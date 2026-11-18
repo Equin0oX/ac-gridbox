@@ -81,4 +81,4 @@ A tyre is outside when any part of its contact patch is beyond the outer edge of
 
 - Each client only knows its own car and keeps it in memory: a driver who reconnects after the session start has no box until an admin re-records.
 - It listens to the event of startLights.lua (key `Start Lights`); a changed layout there breaks the link, the show/hide buttons keep working.
-- The painted grid boxes of a track cannot be read by scripts. The box is drawn from where the car spawned; use `STYLE=TEXT` where the painted boxes are good, or tune `LINE_OFFSET_M`.
+- The paint itself is a texture and cannot be read, but the track's start slots (the `AC_START_n` nodes) can be read by a script. GridBox does not use them yet: the box is drawn from where the car stood when the session started. Whether the slot nodes line up with the painted boxes depends on the track. Use `STYLE=TEXT` where the painted boxes are good, or tune `LINE_OFFSET_M`.
