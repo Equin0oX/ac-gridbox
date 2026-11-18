@@ -1,10 +1,12 @@
 -- GridBox: CSP online script (the server pushes it to every client through a [SCRIPT_...] block in the CSP extra options).
 -- Each client remembers where ITS OWN car stood at the start of a race session and shows that spot (a front line with side lines and
 -- the grid position, or just the position text) until the lights of tetematete's startLights.lua go out, i.e. through the formation
--- lap. The lines stay white; the HUD line turns red while the car is outside, and the script writes to chat only if the car is
--- outside when those lights go out. Outside means: any part of any tyre's contact patch is beyond the outer edge of the front line
--- or of a side line (so a car standing too sideways is outside too). A patch that is on the line is still inside.
--- With the lines hidden (STYLE=TEXT or the toggle button) nothing is checked: no HUD warning, no chat report.
+-- lap. The lines stay white; the HUD line turns red while the car is outside. If the car is outside when those lights go out, its
+-- client sends a report to everybody (a hidden event, nothing appears in the chat) and the clients of signed-in admins append it to
+-- a file (ac.storage: Documents\Assetto Corsa\cfg\extension\state\lua\..., see the README). Outside means: any part of any tyre's
+-- contact patch is beyond the outer edge of the front line or of a side line (so a car standing too sideways is outside too). A
+-- patch that is on the line is still inside.
+-- With the lines hidden (STYLE=TEXT or the toggle button) nothing is checked: no HUD warning, no report.
 -- An admin can bring the boxes back at the remembered spots (another formation lap) with "Grid: show boxes", hide them with
 -- "Grid: hide boxes", switch between lines+text and text only with "Grid: toggle lines" (or STYLE=TEXT in the settings), or
 -- record the spots again with "Grid: re-record boxes".
@@ -26,9 +28,11 @@ local cfg = {
                      -- a car then looks "on the centre of the line" when the check already says outside. Tune with the DEBUG status.
   tolerance = 0,     -- m of extra slack beyond the outer edge of the lines
   boxWidth = 2.4,    -- m between the side lines
-  liveChat = false,  -- also write to chat while a car sits outside before the lights (off: only the report at lights out)
-  finalChat = true,  -- write to chat if the car is outside when the start lights go out
-  hold = 1.5,        -- s a car must sit outside before the live message
+  liveReport = false, -- also report while a car sits outside before the lights (off: only the report at lights out)
+  finalReport = true, -- report if the car is outside when the start lights go out
+  hold = 1.5,        -- s a car must sit outside before the live report
+  jumpReport = true, -- report a car that moves before the start lights go out (it must have stood in its box after they were started)
+  jump = 2,          -- km/h from which a car counts as moving for the jump start
   hideAcLights = false, -- experimental: hide the game's own start lights (the CSP docs say sandboxed scripts may not be allowed to)
   debug = false,     -- always show a status line (and a "loaded" message) so a silent script can be told from an idle one
 }
@@ -114,11 +118,32 @@ local function measure()
   return over - half, side - half
 end
 
-local function report(what)
-  local parts = {}
-  if grid.restOver > cfg.tolerance then parts[#parts + 1] = string.format('%.2f m over the line', grid.restOver) end
-  if grid.restSide > cfg.tolerance then parts[#parts + 1] = string.format('%.2f m outside the box', grid.restSide) end
-  ac.sendChatMessage(string.format('%s %s %s (grid P%d)', car:driverName(), what, table.concat(parts, ' and '), grid.pos))
+-- Reports travel as a hidden event (not chat text) from the driver's client to all clients; an admin's client writes them to a file.
+local reportEvent -- defined with the other events below
+
+-- kind: 0 outside at lights out, 1 outside while parked before the lights (live), 2 jump start (ms = how early the car moved)
+local function report(kind, ms)
+  local over, side = math.max(0, grid.restOver), math.max(0, grid.restSide)
+  reportEvent({ pos = grid.pos, kind = kind, over = math.floor(over * 1000 + 0.5), side = math.floor(side * 1000 + 0.5),
+    ms = math.min(32000, math.floor(ms or 0)) })
+end
+
+local function stamp()
+  local ok, text = pcall(os.date, '%H:%M:%S')
+  return ok and text or string.format('%.0f s', sim.currentSessionTime / 1000)
+end
+
+local reportCount
+-- Appends a line to the admin's report file: ac.storage keeps string keys in an INI under Documents\Assetto Corsa\cfg\extension\
+-- state\lua\ (scripts have no other way to write files). Keys report_001 .. report_999 are reused in a ring, `reports` is the total.
+local function logLine(text)
+  if not reportCount then
+    ac.storageSetPath('gridbox')
+    reportCount = tonumber(ac.storage.reports) or 0
+  end
+  reportCount = reportCount + 1
+  ac.storage[string.format('report_%03d', reportCount % 1000)] = text
+  ac.storage.reports = tostring(reportCount)
 end
 
 -- With the lines hidden (STYLE=TEXT) the drivers go by the track's own painted boxes, so nothing is checked, shown or reported.
@@ -142,18 +167,28 @@ local function tick(dt)
 
   if grid.shown and still and near and outside() then
     grid.hold = grid.hold + dt
-    if cfg.liveChat and grid.hold >= cfg.hold and not grid.reported then
+    if cfg.liveReport and grid.hold >= cfg.hold and not grid.reported then
       grid.reported = true
-      report('is')
+      report(1)
     end
   elseif not outside() then
     grid.hold, grid.reported = 0, false
   end
 
+  -- jump start: after the lights were started, a car that stood in its box and then moves before they go out
+  if lightsOut and cfg.jumpReport and not grid.jumped then
+    if near and car.speedKmh < cfg.jump then
+      grid.armed = true
+    elseif grid.armed and car.speedKmh >= cfg.jump then
+      grid.jumped = true
+      report(2, lightsOut - sim.currentSessionTime)
+    end
+  end
+
   if lightsOut and sim.currentSessionTime >= lightsOut then
     lightsOut = nil
     if grid.shown then
-      if cfg.finalChat and checking() and (grid.restOver > cfg.tolerance or grid.restSide > cfg.tolerance) then report('started') end
+      if cfg.finalReport and checking() and (grid.restOver > cfg.tolerance or grid.restSide > cfg.tolerance) then report(0) end
       grid.shown = false
     end
   end
@@ -260,6 +295,29 @@ ac.OnlineEvent({
   delayTime = ac.StructItem.float(),
 }, function(sender, message)
   lightsOut = message.startTime + message.delayTime
+  if grid then grid.armed, grid.jumped = false, false end
+end, ac.SharedNamespace.ServerScript)
+
+-- The reports: only the clients of signed-in admins write them down (to the file via ac.storage); everybody else ignores them.
+reportEvent = ac.OnlineEvent({
+  key = ac.StructItem.key('GridBoxReport'),
+  pos = ac.StructItem.int16(),
+  kind = ac.StructItem.int16(),
+  over = ac.StructItem.int16(),
+  side = ac.StructItem.int16(),
+  ms = ac.StructItem.int16(),
+}, function(sender, m)
+  if not sim.isAdmin or not sender then return end
+  local what
+  if m.kind == 2 then
+    what = string.format('JUMP START, moved %d ms before the lights went out', m.ms)
+  else
+    local parts = {}
+    if m.over > 0 then parts[#parts + 1] = string.format('%.2f m over the line', m.over / 1000) end
+    if m.side > 0 then parts[#parts + 1] = string.format('%.2f m outside the box', m.side / 1000) end
+    what = table.concat(parts, ' and ') .. (m.kind == 1 and ' (parked, lights not out yet)' or ' at lights out')
+  end
+  logLine(string.format('%s  %s  grid P%d  %s', stamp(), sender:driverName(), m.pos, what))
 end, ac.SharedNamespace.ServerScript)
 
 local function hideAcLights()
@@ -283,8 +341,10 @@ ac.onOnlineWelcome(function(message, config)
   cfg.tolerance = config:get('GRIDBOX', 'TOLERANCE_M', cfg.tolerance)
   cfg.boxWidth = config:get('GRIDBOX', 'BOX_WIDTH_M', cfg.boxWidth)
   cfg.hold = config:get('GRIDBOX', 'LIVE_HOLD_SECONDS', cfg.hold)
-  cfg.liveChat = config:get('GRIDBOX', 'LIVE_CHAT', 0) == 1
-  cfg.finalChat = config:get('GRIDBOX', 'FINAL_CHAT', 1) == 1
+  cfg.liveReport = config:get('GRIDBOX', 'LIVE_REPORT', 0) == 1
+  cfg.finalReport = config:get('GRIDBOX', 'FINAL_REPORT', 1) == 1
+  cfg.jumpReport = config:get('GRIDBOX', 'JUMP_REPORT', 1) == 1
+  cfg.jump = config:get('GRIDBOX', 'JUMP_KMH', cfg.jump)
   cfg.hideAcLights = config:get('GRIDBOX', 'HIDE_AC_LIGHTS', 0) == 1
   cfg.debug = config:get('GRIDBOX', 'DEBUG', 0) == 1
   if cfg.debug then ac.setMessage('GridBox', 'script loaded') end
