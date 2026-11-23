@@ -274,6 +274,12 @@ lua = make(); start_race(lua); lua.execute("lights(2000, 1500); run(1); CAR.spee
 check(n(lua, "nreports()") == 1 and "JUMP START, moved 2450 ms before the lights went out" in n(lua, "lastreport()"), "car moves 2.45 s before lights out: reported as a jump start")
 lua.execute("run(5)")
 check(n(lua, "nreports()") == 1, "a jump start is reported once per start")
+# F1_STYLE starts: the first Start Lights message has a delay of 99999999 ms, the real lights-out comes with a second message
+lua = make(); start_race(lua); lua.execute("lights(5000, 99999999); run(1); CAR.speedKmh = 20; run(0.5)")
+check(n(lua, "nreports()") == 1 and n(lua, "lastreport()").endswith("JUMP START, moved before the lights went out"),
+      "F1_STYLE: a jump start before the manual lights-out is reported without a meaningless number of milliseconds")
+lua = make(); start_race(lua); lua.execute("lights(5000, 99999999); run(2); lights(0, 50); run(0.2); frame()")
+check(n(lua, "#QUADS") == 0 and n(lua, "nreports()") == 0, "F1_STYLE: the second message (Start Lights Out) ends the boxes and a parked car is not reported")
 lua = make(); start_race(lua); lua.execute("CAR.speedKmh = 20; lights(2000, 1500); run(1); CAR.speedKmh = 0; run(0.5); CAR.speedKmh = 20; run(0.5)")
 check(n(lua, "nreports()") == 1, "a car still rolling when the lights started is only a jump start once it has stood in its box and moves again")
 lua = make(); start_race(lua); lua.execute("CAR.speedKmh = 20; lights(2000, 1500); run(5)")

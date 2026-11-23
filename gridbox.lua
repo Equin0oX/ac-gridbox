@@ -457,7 +457,10 @@ reportEvent = ac.OnlineEvent({
   if not sim.isAdmin or not sender then return end
   local what
   if m.kind == 2 then
-    what = string.format('JUMP START, moved %d ms before the lights went out', m.ms)
+    -- 32000 is the clamp: with F1_STYLE starts the lights-out time is unknown until an admin presses "Start Lights Out" (the first
+    -- message carries a delay of about 27 hours), so there is no meaningful number of milliseconds
+    what = m.ms >= 32000 and 'JUMP START, moved before the lights went out' or
+      string.format('JUMP START, moved %d ms before the lights went out', m.ms)
   else
     local parts = {}
     if m.over > 0 then parts[#parts + 1] = string.format('%.2f m over the line', m.over / 1000) end

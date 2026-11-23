@@ -13,25 +13,27 @@ It follows the lights of [tetematete's startLights.lua](https://github.com/tetem
 ## Install (server admin)
 
 1. Use the raw link of one release of `gridbox.lua`:
-   `https://raw.githubusercontent.com/Equin0oX/ac-gridbox/refs/tags/v1.1/gridbox.lua`
+   `https://raw.githubusercontent.com/Equin0oX/ac-gridbox/refs/tags/v1.2/gridbox.lua`
    (or download the file from this page, host it somewhere public yourself and use that link).
 2. In your server manager (ACSM: the event's CSP extra options box; Content Manager: the server preset's CSP extra options) add:
 
 ```ini
 [SCRIPT_...]
-SCRIPT = "https://raw.githubusercontent.com/Equin0oX/ac-gridbox/refs/tags/v1.1/gridbox.lua"
+SCRIPT = "https://raw.githubusercontent.com/Equin0oX/ac-gridbox/refs/tags/v1.2/gridbox.lua"
 
 [GRIDBOX]
 FINAL_REPORT=1
 ```
 
-Keep the section name exactly `[SCRIPT_...]`, as for your other scripts. Players need CSP with online scripts (0.1.76 or newer; tested on 0.3.0-preview212). All tests ran on a CSP-only server (track name `csp/<build>/../<options>/../<track>`) with the literal `[SCRIPT_...]` section; whether a normal server loads the script too has not been tried.
+Keep the section name exactly `[SCRIPT_...]`, as for your other scripts. Players need CSP with online scripts. It was tested on 0.3.0-preview212; tetematete's wiki reports other online scripts working back to build 3465 (0.2.11). CSP builds from 0.2.12-preview1 to 0.3.0-preview139 with the new main menu have a bug that breaks `ac.onOnlineWelcome`: GridBox would then run with its default settings and show no admin buttons. To keep such builds out, use tetematete's Force CSP Version script (`[CSPVERSION] VERSION=...`). All tests ran on a CSP-only server (track name `csp/<build>/../<options>/../<track>`) with the literal `[SCRIPT_...]` section; whether a normal server loads the script too has not been tried.
 
-Do not use a link with `refs/heads/main` on a live server: the script then changes whenever someone pushes to this repository, and it runs on every player's PC. The `v1.1` link never changes. For a newer version, read the changes and switch to its tag. Do not use `v1.0`: its slot box sits 0.42 m behind a car on the Tatuus and would report a correctly parked car as over the line. Anyone who can edit the file behind the link runs code on every player's PC, so keep two-factor login on the account that owns it.
+Do not use a link with `refs/heads/main` on a live server: the script then changes whenever someone pushes to this repository, and it runs on every player's PC. The `v1.2` link never changes. For a newer version, read the changes and switch to its tag. Do not use `v1.0`: its slot box sits 0.42 m behind a car on the Tatuus and would report a correctly parked car as over the line. Anyone who can edit the file behind the link runs code on every player's PC, so keep two-factor login on the account that owns it.
+
+Optional: add `REQUIRED=1` to the `[SCRIPT_...]` block and CSP closes the game of a player whose copy of the script cannot load, so nobody races without boxes.
 
 ## Use
 
-Admins sign in with `/admin <password>` in the chat, then open the extras menu:
+Admins sign in with `/admin <password>` in the chat. The buttons are in the admin menu of the chat app (the settings icon; turn on its admin options). That is how tetematete's wiki describes it: I have not checked it in the game.
 
 | Button | What it does |
 |---|---|
@@ -92,10 +94,11 @@ A tyre is outside when any part of its contact patch is beyond the outer edge of
 - The box comes from the track's start slot: the `AC_START_n` node of the session's forced position or, when the server assigns none (measured: a stock pickup server leaves it at -1), the start node nearest to the standing car. The game spawns a car with its physics origin on that node (measured with the Tatuus: slot error 0.01 m for a car parked where it spawned), and GridBox measures the car's axles from that origin. It does not know where the painted boxes are: on a track whose paint does not match the start nodes, use `STYLE=TEXT` or tune `LINE_OFFSET_M`. Check your track once with `DEBUG=1`: the status line shows `from=slot N` and `slotErr`, the distance between the slot and where the car stood (about 0 for a car parked where it spawned). If it is large, use `SOURCE=CAR`.
 - The paint itself is a texture and cannot be read.
 - In the fallback (no start slot), a driver who reconnects after the session start, or who stands in the pit lane or is still moving when the session starts, gets no box until an admin records again.
-- It listens to the event of startLights.lua (key `Start Lights`); a changed layout there breaks the link, the show/hide buttons keep working.
+- It listens to the event of startLights.lua (key `Start Lights`); a changed layout there breaks the link, the show/hide buttons keep working. With `F1_STYLE=1` there, the lights-out time is only known when an admin presses "Start Lights Out": the boxes stay until then, and a jump start is reported without a number of milliseconds.
 
 ## Versions
 
+- v1.2: a jump start in an `F1_STYLE` start is reported without a meaningless "32000 ms"; README: CSP version bug, where the admin buttons are, `REQUIRED=1`.
 - v1.1: the slot box is measured from the car's physics origin (v1.0 was 0.42 m off on the Tatuus); with no assigned slot (pickup servers) a standing car takes the nearest start node; boxes are only recorded in a race session.
 - v1.0: first release with the slot box. Do not use.
 
