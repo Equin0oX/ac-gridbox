@@ -1,0 +1,74 @@
+# Developing GridBox
+
+GridBox is a single Lua file, `gridbox.lua`, that runs on every player's PC as an Assetto Corsa online script (Custom Shaders Patch, CSP). Read `README.md` first for what it does.
+
+## What is in this repository
+
+| File | What it is |
+|---|---|
+| `gridbox.lua` | the script |
+| `README.md` | what it does, install block, settings |
+| `tests/run_tests.py` | headless tests: the real Lua file under LuaJIT with stubbed CSP functions |
+| `testserver/setup_testserver.py` | builds a throw-away local AC server and deploys the script, to test in the game with one driver |
+| `LICENSE` | MIT |
+
+## Run the tests (no game needed)
+
+```
+pip install lupa
+python tests/run_tests.py
+```
+
+All checks print PASS. The stubs mimic CSP types (vec3 methods return self or `out` like CSP). Add a test for every change and keep the stubs type-faithful, otherwise bugs hide.
+
+## Test in the game
+
+Needs Assetto Corsa, CSP 0.1.76 or newer (tested on 0.3.0-preview212), Content Manager, and the car and track named at the top of `setup_testserver.py` (`CAR`, `TRACK`; also the skins in `ENTRY_LIST` and the `LEGAL_TYRES` line for yours). The setup script stops with a message if the car or track is not installed.
+
+1. Set `AC_GAME` (your assettocorsa folder) and optionally `GRIDBOX_TESTSERVER` (where the server folder goes), then `python testserver/setup_testserver.py`. It builds the server, writes the CSP extra options and copies `gridbox.lua` to `assettocorsa\extension\lua\online\`. It prints a random admin password: the server listens on all interfaces, so there is no fixed one.
+2. Start `acServer.exe` from the server folder. Its session timers run from start even with nobody connected, so join soon.
+3. Close the game if it is open, then run `Start-Process "acmanager://race/online/join?ip=127.0.0.1&httpPort=8091"` and press Drive in Content Manager.
+4. In the chat: `/admin <the printed password>`, `/next_session` to skip practice, `/restart_session` to rerun a session.
+5. The server prints chat as `CHAT [name]: text`, so a script can be watched from outside the game with `ac.sendChatMessage`.
+
+Script edits reload live in the running game (no rejoin) but the script forgets its state, so it records the box again about 1.5 s later if you stand still in a race session. Server settings (the extra options) only change after a server restart and a rejoin.
+
+The test server sets `DEBUG=1`: the status line shows `from=slot N slotErr=...` or `from=car`.
+
+Start lights: the test server also runs tetematete's `startLights.lua` from its public GitHub link. GridBox listens to its `Start Lights` event (same key and layout), so a layout change there breaks the link.
+
+## How the box is found
+
+`record()` tries the track's start slot first: `ac.getSession(sim.currentSessionIndex).forcedPosition` is taken as the 0-based number n of the node `AC_START_n`, the front line goes at the node plus the front-axle offset, and the label is n+1. If `forcedPosition` is -1, the node is missing or the node API is unavailable, it falls back to the car: a standing car, outside the pit lane, in a race session (tried again every 0.5 s for 3 s). `SOURCE=CAR` skips the slot.
+
+Three assumptions are not verified in the game: `forcedPosition` is the 0-based index of the start node; the car's origin sits on the node when it spawns; the node's `getPosition()/getLook()` are in world space. In the test rig `slotErr` should be about 0 for a car that spawned on its slot. If it is not, the slot logic needs a fix or `SOURCE=CAR` has to be the default.
+
+## The report file
+
+Scripts cannot write normal files. GridBox sends a hidden `ac.OnlineEvent` and the client of a signed-in admin writes it through `ac.storage` to `Documents\Assetto Corsa\cfg\extension\state\lua\shared-gridbox`. CSP stores the keys hashed, so the lines are unordered; each value starts with a time stamp. Report numbers are 16 bit, so they are clamped to 32 m / 32 s.
+
+A stock server accepts about one event per 200 ms from a client and the send function returns false when it refuses, so events wait in a small queue (`outbox`) and are retried on later frames.
+
+## Traps that cost hours
+
+- The script section must be named exactly `[SCRIPT_...]`, and the track name of a CSP-only server `csp/3465/../B/../<track>`. With a custom section name (`[SCRIPT_GRIDBOX]`) and a plain `csp/3465/../<track>` the game parsed the settings but never started any script. Which of the two matters is unknown, so use both.
+- Do not link the track under `content/tracks/csp/<track>` on the test server: the server then checksums a path the client lacks and kicks everyone with "Checksum failed". Leave the track unresolvable and the server skips those checksums.
+- Welcome message encoding: UTF-8, zlib level 6, base64 without `=`, 32 tabs and `$CSP0:` in front, appended after the text. `setup_testserver.py` has an encoder and a decoder check.
+- The car origin is not at ground level in every car. Lines are placed by a ray down onto the track meshes (`render.createRay(...):track()`), not from contact points or wheel height.
+- The game's `racePosition` counts empty entry slots. Grid position is 1 + the connected cars ahead.
+- `mklink /J` succeeds even when the target folder does not exist, so a wrong car or track name only shows up later. The setup script checks first.
+
+## References
+
+- CSP Lua API for online scripts: `assettocorsa\extension\internal\lua-sdk\ac_online_script\lib.lua` in your own CSP install.
+- CSP wiki "Misc - Server extra options" (online scripts, welcome message encoding, CSP-only servers).
+- Content Manager source (github.com/gro-ove/actools) for how it builds the welcome message and the track name.
+- tetematete's snippets: github.com/tetematete/OSRLUASNIPPETS (start lights, and `getBoxes` to read the track's start slots).
+
+## Not tested yet in the game
+
+The slot-based box (see above), the show-all-boxes button, the retry of a failed recording, the pit-lane guard, the queue for refused sends, more than one driver at once, a real server, the admin show/hide/toggle buttons and `STYLE=TEXT`. The tests cover all of them with stubs only.
+
+## Be careful with the public link
+
+Whoever can edit the file behind the `SCRIPT =` link runs code on every player's PC. Keep two-factor login on that account, and give servers a link pinned to a tag or commit, never to `main`. Publish a change as a new tag (v1.1, ...) and tell the server admins to read it before switching.

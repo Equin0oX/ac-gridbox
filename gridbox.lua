@@ -1,23 +1,28 @@
 -- GridBox: CSP online script (the server pushes it to every client through a [SCRIPT_...] block in the CSP extra options).
--- Each client remembers where ITS OWN car stood at the start of a race session and shows that spot (a front line with side lines and
--- the grid position, or just the position text) until the lights of tetematete's startLights.lua go out, i.e. through the formation
--- lap. The lines stay white; the HUD line turns red while the car is outside. If the car is outside when those lights go out, its
+-- Each client works out the grid slot of ITS OWN car at the start of a race session (the track's start node AC_START_<n>, n = the
+-- session's forcedPosition; if that is -1 or the slot cannot be determined, the spot where the car stands) and shows it (a front line
+-- with side lines and the grid position, or just the position text) until the lights of tetematete's startLights.lua go out, i.e.
+-- through the formation lap. The lines stay white; the HUD line turns red while the car is outside. If the car is outside when those lights go out, its
 -- client sends a report to everybody (a hidden event, nothing appears in the chat) and the clients of signed-in admins append it to
 -- a file (ac.storage: Documents\Assetto Corsa\cfg\extension\state\lua\..., see the README). Outside means: any part of any tyre's
 -- contact patch is beyond the outer edge of the front line or of a side line (so a car standing too sideways is outside too). A
 -- patch that is on the line is still inside.
 -- With the lines hidden (STYLE=TEXT or the toggle button) nothing is checked: no HUD warning, no report.
 -- An admin can bring the boxes back at the remembered spots (another formation lap) with "Grid: show boxes", hide them with
--- "Grid: hide boxes", switch between lines+text and text only with "Grid: toggle lines" (or STYLE=TEXT in the settings), or
--- record the spots again with "Grid: re-record boxes".
+-- "Grid: hide boxes", switch between lines+text and text only with "Grid: toggle lines" (or STYLE=TEXT in the settings), record the
+-- spots again with "Grid: re-record boxes", and see the boxes of ALL drivers with "Grid: show all boxes": every client sends where
+-- its box is when it records it (a hidden event), and the client of a signed-in admin keeps them.
 -- Settings: a [GRIDBOX] section in the same extra options (all optional, see `cfg` below for the defaults).
--- shortcut: own car only and kept in memory, so a driver who reconnects mid-session loses the box until an admin re-records. The
+-- Trust: every driver's PC decides about itself and any client can send the admin commands; nothing is enforced on a stock server.
+-- shortcut: own car only and kept in memory, so a driver who reconnects mid-session has to wait for the next record. The
 -- start lights are learned from the event of startLights.lua (same key and layout), so a new layout there breaks the link: the
--- show/hide buttons still work. Add syncing of other cars' boxes when stewards ask for it.
+-- show/hide buttons still work.
 local sim = ac.getSim()
 local car = ac.getCar(0)
 
 local cfg = {
+  source = 'AUTO',   -- AUTO: the box comes from the track's start slot of this car, from where the car stands if the slot is unknown;
+                     -- CAR: always from where the car stands
   style = 'BOX',     -- BOX: lines + position text, TEXT: only the position text (the track's own painted boxes stay the reference)
   settle = 1.5,      -- s after a session starts before the box is recorded (cars must be standing still by then)
   still = 3,         -- km/h under which the car counts as standing still
@@ -28,16 +33,26 @@ local cfg = {
                      -- a car then looks "on the centre of the line" when the check already says outside. Tune with the DEBUG status.
   tolerance = 0,     -- m of extra slack beyond the outer edge of the lines
   boxWidth = 2.4,    -- m between the side lines
-  liveReport = false, -- also report while a car sits outside before the lights (off: only the report at lights out)
   finalReport = true, -- report if the car is outside when the start lights go out
-  hold = 1.5,        -- s a car must sit outside before the live report
   jumpReport = true, -- report a car that moves before the start lights go out (it must have stood in its box after they were started)
   jump = 2,          -- km/h from which a car counts as moving for the jump start
-  hideAcLights = false, -- experimental: hide the game's own start lights (the CSP docs say sandboxed scripts may not be allowed to)
   debug = false,     -- always show a status line (and a "loaded" message) so a silent script can be told from an idle one
 }
 local grid, settle, lightsOut, lastError = nil, -1, nil, nil
+local retries = 0 -- recording attempts made after the first one, see tick()
+local showAll, others = false, {} -- admin only: draw every driver's box, the boxes received from the other clients by session ID
+local outbox = {} -- events waiting to be sent: a stock server accepts one per 200 ms and the send function answers false when it refuses
+local reportEvent, shareEvent -- defined with the other events below
 local COL_OK, COL_OVER, COL_TXT = rgbm(0.2, 1, 0.4, 1), rgbm(1, 0.15, 0.1, 1), rgbm(1, 1, 1, 1) -- HUD colours; the lines are COL_TXT, always white
+
+local function send(event, data)
+  if #outbox < 20 then outbox[#outbox + 1] = { event = event, data = data } end
+end
+
+local function flush()
+  local item = outbox[1]
+  if item and item.event(item.data) then table.remove(outbox, 1) end
+end
 
 -- Grid position among the cars that are connected: the game's race position also counts empty entry slots ahead of the car.
 local function gridPosition()
@@ -49,83 +64,169 @@ local function gridPosition()
   return rank
 end
 
--- returns true if a box was recorded
-local function snapshot(anySession)
-  if car.speedKmh >= cfg.still then return false end
-  if not anySession and sim.raceSessionType ~= ac.SessionType.Race then return false end
+-- the four corners of a line of width t from a to b, ready for render.quad
+local function bar(a, b, t)
+  local d = b:clone():sub(a)
+  d.y = 0
+  d:normalize()
+  local n = vec3(d.z * t / 2, 0, -d.x * t / 2)
+  return { a:clone():add(n), b:clone():add(n), b:clone():sub(n), a:clone():sub(n) }
+end
+
+-- Builds the three lines of a box (the front line centred on `line`, facing `fwd`, `length` long, standing on ground about `groundY`
+-- high). The lines never move afterwards, so this runs once per box, not per frame. Each corner is put on the VISIBLE road with a ray
+-- down onto the track meshes: the physics contact points can sit a little above the road model, which made the lines float.
+-- The front line reaches half a line width past the side lines' centres and the side lines half a line width past the front
+-- line's centre, so the outer corners are complete squares instead of notched.
+local function buildBox(line, fwd, length, groundY)
+  local right = vec3(fwd.z, 0, -fwd.x)
+  local base = groundY + 1.5
+  local function road(p)
+    local ok, d = pcall(function() return render.createRay(vec3(p.x, base, p.z), vec3(0, -1, 0), 3):track() end)
+    return ((ok and d and d > 0) and base - d or groundY) + 0.01
+  end
+  local side = right:clone():scale(cfg.boxWidth / 2)
+  local rear = line:clone():addScaled(fwd, -length)
+  local fl, fr = line:clone():add(side), line:clone():sub(side)
+  local rl, rr = rear:clone():add(side), rear:clone():sub(side)
+  fl.y, fr.y, rl.y, rr.y = road(fl), road(fr), road(rl), road(rr)
+  local ext = cfg.lineWidth / 2
+  local alongExt, acrossExt = fwd:clone():scale(ext), right:clone():scale(ext)
+  return {
+    y = (fl.y + fr.y + rl.y + rr.y) / 4,
+    bars = {
+      bar(fl:clone():add(acrossExt), fr:clone():sub(acrossExt), cfg.lineWidth),
+      bar(fl:clone():add(alongExt), rl, cfg.lineWidth),
+      bar(fr:clone():add(alongExt), rr, cfg.lineWidth),
+    },
+  }
+end
+
+-- tells the admins' clients where this car's box is
+local function shareBox()
+  local g = grid
+  send(shareEvent, { pos = g.pos, x = g.line.x, y = g.y, z = g.line.z, fx = g.fwd.x, fz = g.fwd.z, length = g.length })
+end
+
+-- Where the car's axles are: front and rear axle centres, the car's heading, the wheelbase and the ground height under it (the
+-- tyres' contact points; wheel centre minus tyre radius if one is missing; the car origin is not at ground level in every car).
+local function carGeometry()
   local w = car.wheels
   local front = w[0].position:clone():add(w[1].position):scale(0.5)
   local rear = w[2].position:clone():add(w[3].position):scale(0.5)
-  local wheelbase = front:distance(rear)
   local fwd = front:clone():sub(rear)
   fwd.y = 0
   fwd:normalize()
-  -- ground level under the car: the tyres' contact points (the car origin is not at ground level in every car model, and wheel
-  -- centre minus tyre radius ignores how far the tyre is squashed); wheel centre minus radius if a contact point is missing
   local ground = 0
   for k = 0, 3 do
     local cp = w[k].contactPoint
     ground = ground + ((cp and cp:lengthSquared() > 0) and cp.y or (w[k].position.y - (w[k].tyreRadius or 0.3)))
   end
-  local right = vec3(fwd.z, 0, -fwd.x)
-  -- the front line starts at the front edge of the front tyres' contact patches, so the spawn spot itself is on the line
-  local line = front:clone():addScaled(fwd, cfg.lineOffset + cfg.patch / 2)
-  local length = wheelbase + 1.8
-  -- Height of the VISIBLE road under each corner of the box (a ray down onto the track meshes): the physics contact points can sit
-  -- a little above the road model, which made the lines float. Falls back to the average contact height.
-  local base = ground / 4 + 1.5
-  local function road(along, across)
-    local p = line:clone():addScaled(fwd, along):addScaled(right, across)
-    local ok, d = pcall(function() return render.createRay(vec3(p.x, base, p.z), vec3(0, -1, 0), 3):track() end)
-    return ((ok and d and d > 0) and base - d or ground / 4) + 0.01
-  end
-  local half = cfg.boxWidth / 2
-  local yfl, yfr, yrl, yrr = road(0, half), road(0, -half), road(-length, half), road(-length, -half)
-  grid = {
-    fwd = fwd,
-    right = right,
-    line = line,
-    center = front:clone():add(rear):scale(0.5),
-    length = length,
-    y = (yfl + yfr + yrl + yrr) / 4,
-    yfl = yfl, yfr = yfr, yrl = yrl, yrr = yrr,
-    pos = gridPosition(),
-    shown = true,
-    over = 0, side = 0, restOver = 0, restSide = 0, hold = 0, reported = false,
+  return { front = front, rear = rear, fwd = fwd, wheelbase = front:distance(rear), ground = ground / 4 }
+end
+
+-- The state of a box: the front line's centre, the box centre (what the tyres are measured from) and which way the box faces.
+local function newGrid(line, center, fwd, length, groundY, pos)
+  local box = buildBox(line, fwd, length, groundY)
+  return {
+    fwd = fwd, right = vec3(fwd.z, 0, -fwd.x), line = line, center = center,
+    lineAhead = line:clone():sub(center):dot(fwd), -- how far the front line is ahead of the box centre
+    length = length, y = box.y, bars = box.bars, pos = pos, shown = true,
+    over = 0, side = 0, restOver = 0, restSide = 0,
   }
+end
+
+-- The track's start slot of this car: the node AC_START_<n> of the track, n = the session's forcedPosition (-1: not assigned).
+-- Returns the slot number, the node's position and facing, or nothing if the slot cannot be determined.
+local function slotNode()
+  local session = ac.getSession(sim.currentSessionIndex)
+  local index = session and session.forcedPosition
+  if not index or index < 0 then return end
+  local name = string.format('AC_START_%d', index)
+  local node = ac.findNodes('sceneRoot:yes'):findNodes(name)
+  if node:name(1) ~= name then return end
+  local pos, look = node:getPosition(), node:getLook()
+  if pos and look then return index, pos, look end
+end
+
+-- The box from the track's start slot (the main way). The car's origin is taken to sit on the node at the spawn, so the front line is
+-- the front axle's offset from the car origin (measured on this car, wherever it is now) ahead of the node: it works for a car that
+-- spun, joined late or reconnected too. Returns nil if the slot cannot be determined.
+local function slotBox()
+  local ok, index, pos, look = pcall(slotNode)
+  if not ok or not index then return nil end
+  local c = carGeometry()
+  local fwd = look:clone()
+  fwd.y = 0
+  fwd:normalize()
+  local mid = c.front:clone():add(c.rear):scale(0.5)
+  local frontOff = c.front:clone():sub(car.position):dot(c.fwd)
+  local midOff = mid:clone():sub(car.position):dot(c.fwd)
+  local g = newGrid(pos:clone():addScaled(fwd, frontOff + cfg.lineOffset + cfg.patch / 2), pos:clone():addScaled(fwd, midOff), fwd,
+    c.wheelbase + 1.8, pos.y, index + 1)
+  g.slot = index
+  -- how far the box centre from the slot is from where the car really is: about 0 for a car standing on its spawn spot (DEBUG status)
+  if car.speedKmh < cfg.still then g.slotErr = math.sqrt((g.center.x - mid.x) ^ 2 + (g.center.z - mid.z) ^ 2) end
+  return g
+end
+
+-- The fallback: the box from where the car stands. Returns true if it was recorded.
+local function carBox(anySession)
+  if car.speedKmh >= cfg.still then return false end
+  if car.isInPitlane then return false end -- a late joiner standing in the pits has no grid slot (and must not get a jump start report)
+  if not anySession and sim.raceSessionType ~= ac.SessionType.Race then return false end
+  local c = carGeometry()
+  -- the front line starts at the front edge of the front tyres' contact patches, so the spawn spot itself is on the line
+  local line = c.front:clone():addScaled(c.fwd, cfg.lineOffset + cfg.patch / 2)
+  grid = newGrid(line, c.front:clone():add(c.rear):scale(0.5), c.fwd, c.wheelbase + 1.8, c.ground, gridPosition())
+  return true
+end
+
+-- Records this car's box: from the track's start slot, or where the car stands if the slot cannot be determined (forcedPosition -1,
+-- no such node, no node API). Returns true if a box was recorded.
+local function record(anySession)
+  local g = cfg.source ~= 'CAR' and slotBox()
+  if g then
+    grid = g
+  elseif not carBox(anySession) then
+    return false
+  end
   lightsOut = nil
+  shareBox()
   return true
 end
 
 -- How far the car is outside its box, in metres (> 0: outside): `over` is how far the front edge of the most forward front tyre's
 -- contact patch is past the outer edge of the front line, `side` how far the outermost edge of any of the four patches is past the
 -- outer edge of a side line. The patch is a rectangle turned with the car, so a car standing sideways sticks out further.
+-- Plain numbers only (everything is horizontal): this runs every frame.
 local function measure()
   local w, g = car.wheels, grid
   local half = cfg.lineWidth / 2
-  local cf = w[0].position:clone():add(w[1].position):scale(0.5):sub(w[2].position:clone():add(w[3].position):scale(0.5))
-  cf.y = 0
-  cf:normalize()
-  local c, s = math.abs(cf:dot(g.fwd)), math.abs(cf:dot(g.right))
-  local lineAhead = g.line:clone():sub(g.center):dot(g.fwd)
+  local hx = w[0].position.x + w[1].position.x - w[2].position.x - w[3].position.x
+  local hz = w[0].position.z + w[1].position.z - w[2].position.z - w[3].position.z
+  local len = math.sqrt(hx * hx + hz * hz)
+  hx, hz = hx / len, hz / len
+  local c = math.abs(hx * g.fwd.x + hz * g.fwd.z)
+  local s = math.abs(hx * g.right.x + hz * g.right.z)
   local over, side = -1e9, -1e9
   for k = 0, 3 do
-    local d = w[k].position:clone():sub(g.center)
+    local p = w[k].position
+    local dx, dz = p.x - g.center.x, p.z - g.center.z
     local tw = (w[k].tyreWidth or 0.25) / 2
-    if k < 2 then over = math.max(over, d:dot(g.fwd) - lineAhead + cfg.patch / 2 * c + tw * s) end
-    side = math.max(side, math.abs(d:dot(g.right)) + tw * c + cfg.patch / 2 * s - cfg.boxWidth / 2)
+    if k < 2 then over = math.max(over, dx * g.fwd.x + dz * g.fwd.z - g.lineAhead + cfg.patch / 2 * c + tw * s) end
+    side = math.max(side, math.abs(dx * g.right.x + dz * g.right.z) + tw * c + cfg.patch / 2 * s - cfg.boxWidth / 2)
   end
   return over - half, side - half
 end
 
 -- Reports travel as a hidden event (not chat text) from the driver's client to all clients; an admin's client writes them to a file.
-local reportEvent -- defined with the other events below
-
--- kind: 0 outside at lights out, 1 outside while parked before the lights (live), 2 jump start (ms = how early the car moved)
+-- kind: 0 outside at lights out, 2 jump start (ms = how early the car moved)
 local function report(kind, ms)
   local over, side = math.max(0, grid.restOver), math.max(0, grid.restSide)
-  reportEvent({ pos = grid.pos, kind = kind, over = math.floor(over * 1000 + 0.5), side = math.floor(side * 1000 + 0.5),
-    ms = math.min(32000, math.floor(ms or 0)) })
+  -- the event fields are 16 bit numbers: clamp, or a distance above 32.7 m (NEAR_M set high) would wrap to a negative value
+  send(reportEvent, { pos = grid.pos, kind = kind, over = math.min(32000, math.floor(over * 1000 + 0.5)),
+    side = math.min(32000, math.floor(side * 1000 + 0.5)), ms = math.min(32000, math.floor(ms or 0)) })
 end
 
 local function stamp()
@@ -135,7 +236,7 @@ end
 
 local reportCount
 -- Appends a line to the admin's report file: ac.storage keeps string keys in an INI under Documents\Assetto Corsa\cfg\extension\
--- state\lua\ (scripts have no other way to write files). Keys report_001 .. report_999 are reused in a ring, `reports` is the total.
+-- state\lua\ (scripts have no other way to write files). Keys report_000 .. report_999 are reused in a ring, `reports` is the total.
 local function logLine(text)
   if not reportCount then
     ac.storageSetPath('gridbox')
@@ -151,9 +252,13 @@ local function checking() return cfg.style ~= 'TEXT' end
 local function outside() return checking() and (grid.over > cfg.tolerance or grid.side > cfg.tolerance) end
 
 local function tick(dt)
+  flush()
   if settle > 0 then
     settle = settle - dt
-    if settle <= 0 then snapshot(false) end
+    if settle <= 0 and not record(false) and car.speedKmh >= cfg.still and retries < 6 then
+      -- the car was still moving (for example creeping): try again every 0.5 s for a few seconds instead of giving up for the session
+      retries, settle = retries + 1, 0.5
+    end
   end
   if not grid then return end
   grid.over, grid.side = measure()
@@ -163,16 +268,6 @@ local function tick(dt)
     grid.restOver, grid.restSide = 0, 0
   elseif still then
     grid.restOver, grid.restSide = grid.over, grid.side
-  end
-
-  if grid.shown and still and near and outside() then
-    grid.hold = grid.hold + dt
-    if cfg.liveReport and grid.hold >= cfg.hold and not grid.reported then
-      grid.reported = true
-      report(1)
-    end
-  elseif not outside() then
-    grid.hold, grid.reported = 0, false
   end
 
   -- jump start: after the lights were started, a car that stood in its box and then moves before they go out
@@ -195,8 +290,9 @@ local function tick(dt)
 end
 
 local function status()
-  return string.format('GridBox debug: session=%d speed=%.0f settle=%.1f box=%s shown=%s over=%s side=%s lights-out in %s s err=%s',
-    sim.raceSessionType, car.speedKmh, settle, grid and 'yes' or 'no', tostring(grid and grid.shown),
+  return string.format('GridBox debug: session=%d speed=%.0f settle=%.1f box=%s from=%s slotErr=%s shown=%s over=%s side=%s lights-out in %s s err=%s',
+    sim.raceSessionType, car.speedKmh, settle, grid and 'yes' or 'no', grid and (grid.slot and ('slot ' .. grid.slot) or 'car') or '-',
+    grid and grid.slotErr and string.format('%.2f', grid.slotErr) or '-', tostring(grid and grid.shown),
     grid and string.format('%.3f', grid.over) or '-', grid and string.format('%.3f', grid.side) or '-',
     lightsOut and string.format('%.1f', (lightsOut - sim.currentSessionTime) / 1000) or '-', tostring(lastError))
 end
@@ -208,39 +304,34 @@ function script.update(dt)
   if cfg.debug then ac.debug('gridbox status', status()) end
 end
 
--- 3D box / position text -----------------------------------------------------------------------------------------
-local function bar(a, b, t, col)
-  local d = b:clone():sub(a)
-  d.y = 0
-  d:normalize()
-  local n = vec3(d.z * t / 2, 0, -d.x * t / 2)
-  render.quad(a:clone():add(n), b:clone():add(n), b:clone():sub(n), a:clone():sub(n), col)
+-- 3D boxes ---------------------------------------------------------------------------------------------------------
+-- one box: its lines (not with STYLE=TEXT) and a label. `own` boxes say YOUR BOX, with STYLE=TEXT only the position text is drawn.
+local function drawBox(bars, labelAt, text)
+  if cfg.style ~= 'TEXT' then
+    for _, q in ipairs(bars) do render.quad(q[1], q[2], q[3], q[4], COL_TXT) end
+  end
+  render.debugText(labelAt, text, COL_TXT, cfg.style == 'TEXT' and 3 or 1.6)
 end
 
 local function drawWorld()
-  if not grid or not grid.shown then return end
   local g = grid
-  local col = COL_TXT -- always white
+  local own = g and (g.shown or showAll) -- the admin's "show all" includes the admin's own box even after the lights went out
+  if not own and not (showAll and next(others)) then return end
   render.setBlendMode(render.BlendMode.AlphaBlend)
   render.setDepthMode(render.DepthMode.ReadOnly)
-  if cfg.style == 'TEXT' then
-    render.debugText(vec3(g.line.x, g.y + 1.4, g.line.z), string.format('P%d', g.pos), col, 3)
-    return
+  if own then
+    if cfg.style == 'TEXT' then
+      drawBox(g.bars, vec3(g.line.x, g.y + 1.4, g.line.z), string.format('P%d', g.pos))
+    else
+      drawBox(g.bars, vec3(g.center.x, g.y + 1.6, g.center.z), string.format('P%d  YOUR BOX', g.pos))
+    end
   end
-  -- the front line and the two side lines, no rear line
-  local side = g.right:clone():scale(cfg.boxWidth / 2)
-  local rear = g.line:clone():addScaled(g.fwd, -g.length)
-  local fl, fr = g.line:clone():add(side), g.line:clone():sub(side)
-  local rl, rr = rear:clone():add(side), rear:clone():sub(side)
-  fl.y, fr.y, rl.y, rr.y = g.yfl, g.yfr, g.yrl, g.yrr
-  -- the front line reaches half a line width past the side lines' centres and the side lines half a line width past the front line's
-  -- centre, so the outer corners are complete squares instead of notched
-  local ext = cfg.lineWidth / 2
-  local alongExt, acrossExt = g.fwd:clone():scale(ext), g.right:clone():scale(ext)
-  bar(fl:clone():add(acrossExt), fr:clone():sub(acrossExt), cfg.lineWidth, col)
-  bar(fl:clone():add(alongExt), rl, cfg.lineWidth, col)
-  bar(fr:clone():add(alongExt), rr, cfg.lineWidth, col)
-  render.debugText(vec3(g.center.x, g.y + 1.6, g.center.z), string.format('P%d  YOUR BOX', g.pos), col, 1.6)
+  if showAll then
+    for _, o in pairs(others) do
+      local at = cfg.style == 'TEXT' and o.line or o.mid
+      drawBox(o.bars, vec3(at.x, o.y + (cfg.style == 'TEXT' and 1.4 or 1.6), at.z), string.format('P%d  %s', o.pos, o.name))
+    end
+  end
 end
 render.on('main.track.transparent', drawWorld)
 
@@ -271,19 +362,21 @@ end
 
 -- events, session hooks, admin buttons ---------------------------------------------------------------------------
 -- admin commands, sent to every client: 1 record the boxes again, 2 show the remembered boxes again, 3 hide them,
--- 4 switch between lines + text and text only
+-- 4 switch between lines + text and text only, 5 send your box to the admins again
 local commandEvent = ac.OnlineEvent({
   key = ac.StructItem.key('GridBoxRecord'),
   cmd = ac.StructItem.int16(),
 }, function(sender, message)
   if message.cmd == 1 then
-    snapshot(true)
+    record(true)
   elseif message.cmd == 4 then
     cfg.style = cfg.style == 'TEXT' and 'BOX' or 'TEXT'
   elseif grid and message.cmd == 2 then
-    grid.shown, grid.hold, grid.reported, lightsOut = true, 0, false, nil
+    grid.shown, lightsOut = true, nil
   elseif grid and message.cmd == 3 then
     grid.shown = false
+  elseif grid and message.cmd == 5 then
+    shareBox()
   end
 end, ac.SharedNamespace.ServerScript)
 
@@ -315,22 +408,34 @@ reportEvent = ac.OnlineEvent({
     local parts = {}
     if m.over > 0 then parts[#parts + 1] = string.format('%.2f m over the line', m.over / 1000) end
     if m.side > 0 then parts[#parts + 1] = string.format('%.2f m outside the box', m.side / 1000) end
-    what = table.concat(parts, ' and ') .. (m.kind == 1 and ' (parked, lights not out yet)' or ' at lights out')
+    what = table.concat(parts, ' and ') .. ' at lights out'
   end
   logLine(string.format('%s  %s  grid P%d  %s', stamp(), sender:driverName(), m.pos, what))
 end, ac.SharedNamespace.ServerScript)
 
-local function hideAcLights()
-  if cfg.hideAcLights then pcall(ac.disableExtraHUDElements, 'startingLights', true) end
-end
+-- The boxes of the other drivers: where each front line is, which way it faces and how long the box is. Kept by the clients of
+-- signed-in admins only, drawn when "Grid: show all boxes" is on. The own car's message arrives here too and is skipped.
+shareEvent = ac.OnlineEvent({
+  key = ac.StructItem.key('GridBoxShare'),
+  pos = ac.StructItem.int16(),
+  x = ac.StructItem.float(), y = ac.StructItem.float(), z = ac.StructItem.float(),
+  fx = ac.StructItem.float(), fz = ac.StructItem.float(),
+  length = ac.StructItem.float(),
+}, function(sender, m)
+  if not sim.isAdmin or not sender or sender.index == 0 then return end
+  local fwd, line = vec3(m.fx, 0, m.fz), vec3(m.x, m.y, m.z)
+  local box = buildBox(line, fwd, m.length, m.y)
+  others[sender.sessionID] = { bars = box.bars, y = box.y, line = line, mid = line:clone():addScaled(fwd, -m.length / 2),
+    pos = m.pos, name = sender:driverName() }
+end, ac.SharedNamespace.ServerScript)
 
 ac.onSessionStart(function()
-  grid = nil
-  settle = cfg.settle
-  hideAcLights()
+  grid, others = nil, {}
+  settle, retries = cfg.settle, 0
 end)
 
 ac.onOnlineWelcome(function(message, config)
+  cfg.source = config:get('GRIDBOX', 'SOURCE', cfg.source):upper()
   cfg.style = config:get('GRIDBOX', 'STYLE', cfg.style):upper()
   cfg.settle = config:get('GRIDBOX', 'SETTLE_SECONDS', cfg.settle)
   cfg.still = config:get('GRIDBOX', 'STILL_KMH', cfg.still)
@@ -340,22 +445,25 @@ ac.onOnlineWelcome(function(message, config)
   cfg.patch = config:get('GRIDBOX', 'PATCH_M', cfg.patch)
   cfg.tolerance = config:get('GRIDBOX', 'TOLERANCE_M', cfg.tolerance)
   cfg.boxWidth = config:get('GRIDBOX', 'BOX_WIDTH_M', cfg.boxWidth)
-  cfg.hold = config:get('GRIDBOX', 'LIVE_HOLD_SECONDS', cfg.hold)
-  cfg.liveReport = config:get('GRIDBOX', 'LIVE_REPORT', 0) == 1
   cfg.finalReport = config:get('GRIDBOX', 'FINAL_REPORT', 1) == 1
   cfg.jumpReport = config:get('GRIDBOX', 'JUMP_REPORT', 1) == 1
   cfg.jump = config:get('GRIDBOX', 'JUMP_KMH', cfg.jump)
-  cfg.hideAcLights = config:get('GRIDBOX', 'HIDE_AC_LIGHTS', 0) == 1
   cfg.debug = config:get('GRIDBOX', 'DEBUG', 0) == 1
   if cfg.debug then ac.setMessage('GridBox', 'script loaded') end
-  if not grid then settle = cfg.settle end
-  hideAcLights()
-  local function admin(title, cmd)
-    ui.registerOnlineExtra(ui.Icons.Pitlane, title, function() return true end, nil,
-      function() commandEvent({ cmd = cmd }) end, ui.OnlineExtraFlags.Admin)
+  if not grid then settle, retries = cfg.settle, 0 end
+  local function admin(title, action)
+    ui.registerOnlineExtra(ui.Icons.Pitlane, title, function() return true end, nil, action, ui.OnlineExtraFlags.Admin)
   end
-  admin('Grid: re-record boxes', 1)
-  admin('Grid: show boxes', 2)
-  admin('Grid: hide boxes', 3)
-  admin('Grid: toggle lines', 4)
+  admin('Grid: re-record boxes', function() commandEvent({ cmd = 1 }) end)
+  admin('Grid: show boxes', function() commandEvent({ cmd = 2 }) end)
+  admin('Grid: hide boxes', function() commandEvent({ cmd = 3 }) end)
+  admin('Grid: toggle lines', function() commandEvent({ cmd = 4 }) end)
+  -- only for this admin: show every driver's box; switching it on asks everybody to send their box again
+  admin('Grid: show all boxes', function()
+    showAll = not showAll
+    if showAll then
+      others = {}
+      commandEvent({ cmd = 5 })
+    end
+  end)
 end)

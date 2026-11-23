@@ -1,2 +1,2 @@
-# local test rig (machine specific paths), not part of the script
-testserver/
+__pycache__/
+*.pyc
