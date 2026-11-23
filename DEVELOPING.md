@@ -33,7 +33,7 @@ Needs Assetto Corsa, CSP 0.1.76 or newer (tested on 0.3.0-preview212), Content M
 
 Script edits reload live in the running game (no rejoin) but the script forgets its state, so it records the box again about 1.5 s later if you stand still in a race session. Server settings (the extra options) only change after a server restart and a rejoin.
 
-The test server sets `DEBUG=1`: the status line shows `from=slot N slotErr=...` or `from=car`.
+The test server sets `DEBUG=1`: the status line shows `from=slot N slotErr=...` or `from=car`, and `GridBox:` lines go to `Documents\Assetto Corsa\logs\custom_shaders_patch.log` (grep that file instead of screenshotting the game). To test on another track set `GRIDBOX_TRACK` and `GRIDBOX_LAYOUT` before running the setup script, for example `rt_autodrom_most` and `no_chicane` (Autodrom Most, which has painted grid boxes). Start the server with its output captured, so a silent stop leaves a trace: `Start-Process acServer.exe -WorkingDirectory <server folder> -WindowStyle Hidden -RedirectStandardOutput server_out.txt -RedirectStandardError server_err.txt`.
 
 Start lights: the test server also runs tetematete's `startLights.lua` from its public GitHub link. GridBox listens to its `Start Lights` event (same key and layout), so a layout change there breaks the link.
 

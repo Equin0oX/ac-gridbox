@@ -77,16 +77,20 @@ Every driver's PC decides about itself and sends its own report. A stock server 
 | JUMP_REPORT | 1 | report a car that moves before the lights go out (after it stood in its box) |
 | JUMP_KMH | 2 | speed from which a car counts as moving |
 | PATCH_M | 0.1 | length of a tyre's contact patch in metres |
-| LINE_OFFSET_M | 0 | move the front line forward (+) or back (-) |
+| LINE_OFFSET_M | 0 | move the front line forward (+) or back (-) from the front edge of the front tyres' contact patch at the start slot; set it per track, see "Fit the line to a track" |
 | BOX_WIDTH_M | 2.4 | distance between the side lines |
 | LINE_WIDTH_M | 0.08 | width of the lines |
 | TOLERANCE_M | 0 | extra slack beyond the outer edge of the lines |
 | SETTLE_SECONDS | 1.5 | seconds after a session starts before the box is recorded |
 | STILL_KMH | 3 | speed under which a car counts as standing still |
 | NEAR_M | 20 | a standing car is checked only within this distance of its box |
-| DEBUG | 0 | show a status line with the measured margins (`over=`, `side=`) and where the box came from (`from=slot N` or `from=car`) |
+| DEBUG | 0 | a status line with the measured margins (`over=`, `side=`) and where the box came from (`from=slot N` or `from=car`), a second line with why a slot was not used, the start-node count and `line-offset`; yellow crosses and names on the track's start nodes near the car; two admin buttons to nudge the front line by 5 cm; and a line in the CSP log (`Documents\Assetto Corsa\logs\custom_shaders_patch.log`) for the recording, Start Lights event, lights out, reports and admin commands |
 
 A tyre is outside when any part of its contact patch is beyond the outer edge of the front line or a side line. A car standing too sideways counts too.
+
+## Fit the line to a track
+
+The game spawns each car with its physics origin on the track's start node, but the painted line can be anywhere in front of it, so the front line needs one offset per track (and per car model, because it is measured from the front tyres). With `DEBUG=1`, stand in your box and press the admin buttons `Grid debug: front line 5 cm forward` or `5 cm back` until the white line lies on the painted one. The second debug line shows `line-offset=`; the last `recorded ... line-offset=` line in the CSP log has the same number. Put it in `LINE_OFFSET_M`. Measured: Autodrom Most (`rt_autodrom_most`, no chicane layout) with the Tatuus FT-60K needs `LINE_OFFSET_M=0.65`, which puts the line 2.40 m ahead of the start node. The debug buttons move only the front line; `BOX_WIDTH_M` stayed at 2.4 in that test.
 
 ## Limits
 

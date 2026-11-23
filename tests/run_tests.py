@@ -79,6 +79,8 @@ SENDER = {index = 0}
 function SENDER:driverName() return 'Test Driver' end
 function ac.debug(k, v) DEBUG[k] = v end
 function ac.setMessage(t, d) MSG[#MSG + 1] = t .. ':' .. d end
+LOG, CROSSES, ARROWS = {}, {}, {}
+function ac.log(...) LOG[#LOG + 1] = table.concat({...}, ' ') end
 function ac.disableExtraHUDElements(id, d) HUDOFF[#HUDOFF + 1] = id end
 function ac.StructItem.key(k) return k end
 function ac.StructItem.int16() return 'int16' end
@@ -105,8 +107,10 @@ function render.setBlendMode() end
 function render.setDepthMode() end
 function render.quad(a, b, c, d, col) assert(a.x and d.z and col.r) QUADS[#QUADS + 1] = col QUADY = a.y QV[#QV + 1] = {{a.x, a.z, a.y}, {b.x, b.z, b.y}, {c.x, c.z, c.y}, {d.x, d.z, d.y}} end
 function render.debugText(p, text, col, scale) assert(p.x and type(text) == 'string') LABELS[#LABELS + 1] = text end
+function render.debugCross(p, size, col) assert(p.x and size > 0 and col.r) CROSSES[#CROSSES + 1] = {p.x, p.z} end
+function render.debugArrow(a, b, size, col) assert(a.x and b.x and col.r) ARROWS[#ARROWS + 1] = {a.x, b.x} end
 script = {}
-function reset() CHAT, HUD, QUADS, LABELS, QV = {}, {}, {}, {}, {} end
+function reset() CHAT, HUD, QUADS, LABELS, QV, CROSSES, ARROWS = {}, {}, {}, {}, {}, {}, {} end
 function run(seconds) for i = 1, math.floor(seconds / 0.05 + 0.5) do SIM.currentSessionTime = SIM.currentSessionTime + 50 script.update(0.05) end end
 function frame() reset() RENDER_CB() script.drawUI() end
 function button(title) for _, b in ipairs(BUTTONS) do if b.title == title then b.click() return end end error('no button ' .. title) end
@@ -360,7 +364,7 @@ lua = make(); lua.execute("SLOT = -1; " + spawn + "; CAR.transform = nil"); star
 check(n(lua, "#QUADS") == 3, "no physics transform: no slot box, the car's own spot is used")
 # 18c no slot assigned (forcedPosition -1, a pickup server): a standing car takes the start node it stands nearest to
 lua = make({"DEBUG": 1}); lua.execute("SLOT = -1"); start_race(lua); lua.execute("frame()")
-check("from=slot 0 slotErr=0.00" in n(lua, "HUD[1][1]") and n(lua, "LABELS[1]") == "P1  YOUR BOX", "forcedPosition -1, car on node 0: the box comes from node 0")
+check("from=slot 0 slotErr=0.00" in n(lua, "HUD[1][1]") and "P1  YOUR BOX" in list(lua.eval("LABELS").values()), "forcedPosition -1, car on node 0: the box comes from node 0")
 lua = make(); lua.execute("SLOT = -1; place(94.4, 53.3)"); start_race(lua); lua.execute("frame()")
 check(abs(max(xs(2)) - 95.44) < 1e-6 and n(lua, "LABELS[1]") == "P1  YOUR BOX",
       "car 0.5 m from node 1: the box stands at node 1, labelled by the grid position among connected cars (P1), not node number + 1")
@@ -420,6 +424,26 @@ lua = make(); lua.execute("SIM.isAdmin = false"); start_race(lua); lua.execute("
 check(n(lua, "#QUADS") == 3, "a client that is not an admin ignores shared boxes")
 lua = make({"STYLE": "text"}); start_race(lua); lua.execute("button('Grid: show all boxes'); " + share + "; frame()")
 check(n(lua, "#QUADS") == 0 and "P2  Other Driver" in list(lua.eval("LABELS").values()), "STYLE=TEXT: other boxes are only their position text and name")
+
+# 23 debugging aids (DEBUG=1 only): log lines in the CSP log, start node markers, nudge buttons for the line offset
+logtext = lambda lua: chr(10).join(lua.eval("LOG").values())
+lua = make(); start_race(lua); lua.execute("lights(2000, 1500); run(4); frame()")
+check(n(lua, "#LOG") == 0 and n(lua, "#CROSSES") == 0 and n(lua, "#BUTTONS") == 5, "DEBUG off: nothing logged, no node markers, no nudge buttons")
+lua = make({"DEBUG": 1}); start_race(lua); lua.execute("lights(2000, 1500); run(4); frame()")
+log = logtext(lua)
+check("recorded P1 from=slot 0 slotErr=0.00 line-offset=+0.00 m" in log and "start lights event: lights out in 3500 ms" in log
+      and "lights out: box shown=true" in log and "session start: index 1, type 3, forcedPosition -1" in log, "DEBUG: session start, recording, start lights and lights out are logged")
+lua.execute("frame()")
+check(n(lua, "#CROSSES") == 2 and "AC_START_0" in list(lua.eval("LABELS").values()), "DEBUG: the start nodes near the car are marked with a cross, an arrow and their name")
+lua = make({"DEBUG": 1}); lua.execute("place(300, 300)"); start_race(lua); lua.execute("frame()")
+check(n(lua, "#CROSSES") == 0, "DEBUG: start nodes further than 40 m from the car are not marked")
+lua = make({"DEBUG": 1}); start_race(lua); lua.execute("button('Grid debug: front line 5 cm forward'); frame()")
+check(abs(max(xs(2)) - 101.49) < 1e-6 and "line-offset=+0.05 m" in n(lua, "HUD[2][1]") and "line-offset=+0.05 m" in logtext(lua),
+      "DEBUG: 'front line 5 cm forward' moves the box line 5 cm and shows the new offset")
+lua.execute("button('Grid debug: front line 5 cm back'); button('Grid debug: front line 5 cm back'); frame()")
+check(abs(max(xs(2)) - 101.39) < 1e-6, "DEBUG: 'front line 5 cm back' twice ends 5 cm behind the start")
+lua = make({"DEBUG": 1}); start_race(lua); lua.execute("place(100.30, 50); run(1); lights(500, 100); run(1)")
+check("report kind 0: P1 over=" in logtext(lua), "DEBUG: a report is logged when it is sent")
 
 print("\n%d failed" % len(fails) if fails else "\nall passed")
 raise SystemExit(1 if fails else 0)

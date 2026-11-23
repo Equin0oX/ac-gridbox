@@ -16,7 +16,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 GAME = os.environ.get("AC_GAME", r"F:\SteamLibrary\steamapps\common\assettocorsa")
 DEST = os.environ.get("GRIDBOX_TESTSERVER", r"F:\gridbox_testserver")
 CAR = "tatuus_ft_60K"
-TRACK = "aa_bgs"  # Bowman Gray Stadium, a short oval: quick formation laps
+# Bowman Gray Stadium, a short oval: quick formation laps. GRIDBOX_TRACK / GRIDBOX_LAYOUT pick another track, for example
+# rt_autodrom_most + no_chicane (a track with painted grid boxes); LAYOUT is empty for a track without layouts.
+TRACK = os.environ.get("GRIDBOX_TRACK", "aa_bgs")
+LAYOUT = os.environ.get("GRIDBOX_LAYOUT", "")
 SCRIPT_SRC = os.path.join(HERE, "..", "gridbox.lua")
 SCRIPT_DST = os.path.join(GAME, "extension", "lua", "online", "gridbox.lua")  # SCRIPT = gridbox.lua is read from here
 
@@ -49,7 +52,7 @@ DEBUG=1
 SERVER_CFG = """[SERVER]
 NAME=GridBox test
 CARS=@CAR@
-CONFIG_TRACK=
+CONFIG_TRACK=@LAYOUT@
 TRACK=csp/3465/../B/../@TRACK@
 SUN_ANGLE=48
 PASSWORD=
@@ -149,6 +152,7 @@ def main():
     assert decode_welcome(welcome_text("hi\n", EXTRA_OPTIONS)) == EXTRA_OPTIONS, "welcome encoding does not round-trip"
     # mklink would happily link a folder that does not exist: check first, so a missing car shows up here and not later in the game
     for what, path in (("car " + CAR, os.path.join(GAME, "content", "cars", CAR)), ("track " + TRACK, os.path.join(GAME, "content", "tracks", TRACK)),
+                       ("track layout " + LAYOUT, os.path.join(GAME, "content", "tracks", TRACK, LAYOUT)),
                        ("game server folder", os.path.join(GAME, "server", "acServer.exe"))):
         if not os.path.exists(path):
             sys.exit("not found: the %s (%s). Set AC_GAME to your assettocorsa folder or change CAR / TRACK at the top of this script." % (what, path))
@@ -177,7 +181,7 @@ def main():
     subprocess.run(["cmd", "/c", "mklink", "/J", link, os.path.join(GAME, "content", "cars", CAR)], check=True)
     for name, text in (("server_cfg.ini", SERVER_CFG), ("entry_list.ini", ENTRY_LIST),
                        ("welcome.txt", welcome_text("GridBox test server\n", EXTRA_OPTIONS))):
-        text = text.replace("@CAR@", CAR).replace("@TRACK@", TRACK).replace("@PASSWORD@", password)
+        text = text.replace("@CAR@", CAR).replace("@TRACK@", TRACK).replace("@LAYOUT@", LAYOUT).replace("@PASSWORD@", password)
         with open(os.path.join(DEST, "cfg", name), "w", encoding="utf-8", newline="\n") as f:
             f.write(text)
     with open(os.path.join(DEST, "run_server.bat"), "w", newline="\r\n") as f:

@@ -46,7 +46,14 @@ local retries = 0 -- recording attempts made after the first one, see tick()
 local showAll, others = false, {} -- admin only: draw every driver's box, the boxes received from the other clients by session ID
 local outbox = {} -- events waiting to be sent: a stock server accepts one per 200 ms and the send function answers false when it refuses
 local reportEvent, shareEvent -- defined with the other events below
+local startNodes -- DEBUG: the track's start nodes, read once per session (drawStartNodes)
 local COL_OK, COL_OVER, COL_TXT = rgbm(0.2, 1, 0.4, 1), rgbm(1, 0.15, 0.1, 1), rgbm(1, 1, 1, 1) -- HUD colours; the lines are COL_TXT, always white
+
+-- DEBUG=1: a line in the CSP log (Documents\Assetto Corsa\logs\custom_shaders_patch.log) for every important step, so a test can be
+-- read from that file afterwards instead of from the screen
+local function dlog(...)
+  if cfg.debug then ac.log('GridBox: ' .. string.format(...)) end
+end
 
 local function send(event, data)
   if #outbox < 20 then outbox[#outbox + 1] = { event = event, data = data } end
@@ -230,10 +237,14 @@ local function record(anySession)
   if g then
     grid = g
   elseif not carBox() then
+    dlog('no box recorded (session type %d, speed %.1f, pit lane %s): %s', sim.raceSessionType, car.speedKmh, tostring(car.isInPitlane), slotWhy)
     return false
   end
   lightsOut = nil
   shareBox()
+  dlog('recorded P%d from=%s slotErr=%s line-offset=%+.2f m, front line at x=%.2f z=%.2f, facing x=%.3f z=%.3f', grid.pos,
+    grid.slot and ('slot ' .. grid.slot) or 'car', grid.slotErr and string.format('%.2f', grid.slotErr) or '-', cfg.lineOffset,
+    grid.line.x, grid.line.z, grid.fwd.x, grid.fwd.z)
   return true
 end
 
@@ -265,6 +276,7 @@ end
 -- kind: 0 outside at lights out, 2 jump start (ms = how early the car moved)
 local function report(kind, ms)
   local over, side = math.max(0, grid.restOver), math.max(0, grid.restSide)
+  dlog('report kind %d: P%d over=%.3f side=%.3f ms=%.0f', kind, grid.pos, over, side, ms or 0)
   -- the event fields are 16 bit numbers: clamp, or a distance above 32.7 m (NEAR_M set high) would wrap to a negative value
   send(reportEvent, { pos = grid.pos, kind = kind, over = math.min(32000, math.floor(over * 1000 + 0.5)),
     side = math.min(32000, math.floor(side * 1000 + 0.5)), ms = math.min(32000, math.floor(ms or 0)) })
@@ -323,6 +335,8 @@ local function tick(dt)
 
   if lightsOut and sim.currentSessionTime >= lightsOut then
     lightsOut = nil
+    dlog('lights out: box shown=%s speed=%.1f, measured at rest over=%.3f side=%.3f, now over=%.3f side=%.3f', tostring(grid.shown),
+      car.speedKmh, grid.restOver, grid.restSide, grid.over, grid.side)
     if grid.shown then
       if cfg.finalReport and checking() and (grid.restOver > cfg.tolerance or grid.restSide > cfg.tolerance) then report(0) end
       grid.shown = false
@@ -345,7 +359,7 @@ local function slotStatus()
     local best, dist, count = nearestStart(ac.findNodes('sceneRoot:yes'))
     return string.format('start nodes=%d nearest=%s (%.2f m)', count, tostring(best), dist or -1)
   end)
-  return string.format('why-not-slot=%s  %s', slotWhy, ok and text or ('start nodes: error ' .. tostring(text)))
+  return string.format('why-not-slot=%s  %s  line-offset=%+.2f m', slotWhy, ok and text or ('start nodes: error ' .. tostring(text)), cfg.lineOffset)
 end
 
 function script.update(dt)
@@ -364,7 +378,32 @@ local function drawBox(bars, labelAt, text)
   render.debugText(labelAt, text, COL_TXT, cfg.style == 'TEXT' and 3 or 1.6)
 end
 
+-- DEBUG: every start node of the track within 40 m of the car (a yellow cross, its facing and its name), to compare them with the
+-- painted boxes of the track. Read once per session.
+local COL_NODE = rgbm(1, 0.8, 0, 1)
+local function drawStartNodes()
+  if not startNodes then
+    startNodes = {}
+    pcall(function()
+      local root = ac.findNodes('sceneRoot:yes')
+      for i = 0, root:findNodes('AC_START_?'):size() - 1 do
+        local node = root:findNodes('AC_START_' .. i)
+        startNodes[#startNodes + 1] = { name = 'AC_START_' .. i, pos = node:getPosition():clone(), look = node:getLook():clone() }
+      end
+    end)
+  end
+  for _, n in ipairs(startNodes) do
+    if math.abs(n.pos.x - car.position.x) < 40 and math.abs(n.pos.z - car.position.z) < 40 then
+      local at = vec3(n.pos.x, n.pos.y + 0.05, n.pos.z)
+      render.debugCross(at, 0.4, COL_NODE)
+      render.debugArrow(at, at:clone():addScaled(n.look, 2), 0.1, COL_NODE)
+      render.debugText(vec3(n.pos.x, n.pos.y + 0.6, n.pos.z), n.name, COL_NODE, 1)
+    end
+  end
+end
+
 local function drawWorld()
+  if cfg.debug then drawStartNodes() end
   local g = grid
   local own = g and (g.shown or showAll) -- the admin's "show all" includes the admin's own box even after the lights went out
   if not own and not (showAll and next(others)) then return end
@@ -421,6 +460,7 @@ local commandEvent = ac.OnlineEvent({
   key = ac.StructItem.key('GridBoxRecord'),
   cmd = ac.StructItem.int16(),
 }, function(sender, message)
+  dlog('admin command %d from car %s', message.cmd, tostring(sender and sender.index))
   if message.cmd == 1 then
     record(true)
   elseif message.cmd == 4 then
@@ -442,6 +482,7 @@ ac.OnlineEvent({
   delayTime = ac.StructItem.float(),
 }, function(sender, message)
   lightsOut = message.startTime + message.delayTime
+  dlog('start lights event: lights out in %.0f ms', lightsOut - sim.currentSessionTime)
   if grid then grid.armed, grid.jumped = false, false end
 end, ac.SharedNamespace.ServerScript)
 
@@ -487,8 +528,10 @@ shareEvent = ac.OnlineEvent({
 end, ac.SharedNamespace.ServerScript)
 
 ac.onSessionStart(function()
-  grid, others = nil, {}
+  grid, others, startNodes = nil, {}, nil
   settle, retries = cfg.settle, 0
+  dlog('session start: index %d, type %d, forcedPosition %s', sim.currentSessionIndex, sim.raceSessionType,
+    tostring((ac.getSession(sim.currentSessionIndex) or {}).forcedPosition))
 end)
 
 ac.onOnlineWelcome(function(message, config)
@@ -524,4 +567,11 @@ ac.onOnlineWelcome(function(message, config)
       commandEvent({ cmd = 5 })
     end
   end)
+  if cfg.debug then
+    -- tuning against painted lines: move the front line by 5 cm and record the own box again (this client only); the offset to put
+    -- in LINE_OFFSET_M is shown as line-offset in the debug status
+    local function nudge(d) cfg.lineOffset = cfg.lineOffset + d record(true) end
+    admin('Grid debug: front line 5 cm forward', function() nudge(0.05) end)
+    admin('Grid debug: front line 5 cm back', function() nudge(-0.05) end)
+  end
 end)
