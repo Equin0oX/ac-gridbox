@@ -445,5 +445,21 @@ check(abs(max(xs(2)) - 101.39) < 1e-6, "DEBUG: 'front line 5 cm back' twice ends
 lua = make({"DEBUG": 1}); start_race(lua); lua.execute("place(100.30, 50); run(1); lights(500, 100); run(1)")
 check("report kind 0: P1 over=" in logtext(lua), "DEBUG: a report is logged when it is sent")
 
+# 24 LINE_FROM_NODE_M: the front line lies a fixed distance ahead of the start node whatever the car (a track's paint is the same for
+# every car model); without it the line follows the front tyres of the car
+short = "for k = 0, 1 do local w = CAR.wheels[k] w.position.x = w.position.x - 0.35 w.contactPoint.x = w.contactPoint.x - 0.35 end"  # a shorter nose
+lua = make({"LINE_FROM_NODE_M": 2.4}); start_race(lua); lua.execute("frame()")
+check(abs(max(xs(2)) - 102.44) < 1e-6, "LINE_FROM_NODE_M=2.4: the front line lies 2.40 m ahead of the node (outer edge x 102.44)")
+lua = make({"LINE_FROM_NODE_M": 2.4}); lua.execute(short); start_race(lua); lua.execute("frame()")
+check(abs(max(xs(2)) - 102.44) < 1e-6, "LINE_FROM_NODE_M=2.4 with a car whose front axle is 0.35 m closer: the same line")
+lua = make(); lua.execute(short); start_race(lua); lua.execute("frame()")
+check(abs(max(xs(2)) - 101.09) < 1e-6, "without LINE_FROM_NODE_M the line follows that car's front tyres (outer edge x 101.09)")
+lua = make({"LINE_FROM_NODE_M": 2.4, "SOURCE": "car"}); start_race(lua); lua.execute("frame()")
+check(abs(max(xs(2)) - 101.44) < 1e-6, "SOURCE=CAR ignores LINE_FROM_NODE_M (there is no node)")
+lua = make({"LINE_FROM_NODE_M": 2.4, "DEBUG": 1}); start_race(lua); lua.execute("button('Grid debug: front line 5 cm forward'); frame()")
+check("line-from-node=2.45 m" in n(lua, "HUD[2][1]") and abs(max(xs(2)) - 102.49) < 1e-6, "LINE_FROM_NODE_M with the nudge button: 2.45 m shown, the line moves 5 cm")
+lua = make({"DEBUG": 1}); start_race(lua); lua.execute("frame()")
+check("line-from-node=1.40 m" in n(lua, "HUD[2][1]"), "DEBUG shows the distance of the front line from the node (1.40 m for this car without the setting): the value to put in LINE_FROM_NODE_M")
+
 print("\n%d failed" % len(fails) if fails else "\nall passed")
 raise SystemExit(1 if fails else 0)

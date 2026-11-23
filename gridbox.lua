@@ -30,6 +30,8 @@ local cfg = {
   settle = 1.5,      -- s after a session starts before the box is recorded (cars must be standing still by then)
   still = 3,         -- km/h under which the car counts as standing still
   near = 20,         -- m from its box within which a standing car is checked
+  lineFromNode = 0,  -- m, > 0: the front line lies this far ahead of the start node whatever the car (fits a track's paint for every car model;
+                     -- only with a start slot, the car fallback ignores it); 0: measured from the front tyres of the car, see lineOffset
   lineOffset = 0,    -- m, moves the front line ahead (+) or behind (-) of where the front tyres' contact patches ended at the start
   lineWidth = 0.08,  -- m, drawn width of the lines; a patch may reach their outer edge
   patch = 0.1,       -- m, length of a tyre's contact patch. Too long a value puts the drawn front line too far ahead of the real patch:
@@ -210,9 +212,12 @@ local function slotBox()
   local mid = c.front:clone():add(c.rear):scale(0.5)
   local frontOff = c.front:clone():sub(origin):dot(c.fwd)
   local midOff = mid:clone():sub(origin):dot(c.fwd)
-  local g = newGrid(pos:clone():addScaled(fwd, frontOff + cfg.lineOffset + cfg.patch / 2), pos:clone():addScaled(fwd, midOff), fwd,
+  -- the front line is LINE_FROM_NODE_M ahead of the node (the same for every car model, as the paint is where it is) or, without that
+  -- setting, at the front edge of this car's front tyres; LINE_OFFSET_M moves it either way
+  local ahead = (cfg.lineFromNode > 0 and cfg.lineFromNode or frontOff + cfg.patch / 2) + cfg.lineOffset
+  local g = newGrid(pos:clone():addScaled(fwd, ahead), pos:clone():addScaled(fwd, midOff), fwd,
     c.wheelbase + 1.8, pos.y, assigned and index + 1 or gridPosition()) -- an assigned slot names the position, a nearest node does not (empty entries count)
-  g.slot = index
+  g.slot, g.ahead = index, ahead
   -- how far the box centre from the slot is from where the car really is: about 0 for a car standing on its spawn spot (DEBUG status)
   if car.speedKmh < cfg.still then g.slotErr = math.sqrt((g.center.x - mid.x) ^ 2 + (g.center.z - mid.z) ^ 2) end
   return g
@@ -242,9 +247,9 @@ local function record(anySession)
   end
   lightsOut = nil
   shareBox()
-  dlog('recorded P%d from=%s slotErr=%s line-offset=%+.2f m, front line at x=%.2f z=%.2f, facing x=%.3f z=%.3f', grid.pos,
+  dlog('recorded P%d from=%s slotErr=%s line-offset=%+.2f m line-from-node=%s, front line at x=%.2f z=%.2f, facing x=%.3f z=%.3f', grid.pos,
     grid.slot and ('slot ' .. grid.slot) or 'car', grid.slotErr and string.format('%.2f', grid.slotErr) or '-', cfg.lineOffset,
-    grid.line.x, grid.line.z, grid.fwd.x, grid.fwd.z)
+    grid.ahead and string.format('%.2f m', grid.ahead) or '-', grid.line.x, grid.line.z, grid.fwd.x, grid.fwd.z)
   return true
 end
 
@@ -359,7 +364,8 @@ local function slotStatus()
     local best, dist, count = nearestStart(ac.findNodes('sceneRoot:yes'))
     return string.format('start nodes=%d nearest=%s (%.2f m)', count, tostring(best), dist or -1)
   end)
-  return string.format('why-not-slot=%s  %s  line-offset=%+.2f m', slotWhy, ok and text or ('start nodes: error ' .. tostring(text)), cfg.lineOffset)
+  return string.format('why-not-slot=%s  %s  line-offset=%+.2f m  line-from-node=%s', slotWhy,
+    ok and text or ('start nodes: error ' .. tostring(text)), cfg.lineOffset, grid and grid.ahead and string.format('%.2f m', grid.ahead) or '-')
 end
 
 function script.update(dt)
@@ -541,6 +547,7 @@ ac.onOnlineWelcome(function(message, config)
   cfg.settle = config:get('GRIDBOX', 'SETTLE_SECONDS', cfg.settle)
   cfg.still = config:get('GRIDBOX', 'STILL_KMH', cfg.still)
   cfg.near = config:get('GRIDBOX', 'NEAR_M', cfg.near)
+  cfg.lineFromNode = config:get('GRIDBOX', 'LINE_FROM_NODE_M', cfg.lineFromNode)
   cfg.lineOffset = config:get('GRIDBOX', 'LINE_OFFSET_M', cfg.lineOffset)
   cfg.lineWidth = config:get('GRIDBOX', 'LINE_WIDTH_M', cfg.lineWidth)
   cfg.patch = config:get('GRIDBOX', 'PATCH_M', cfg.patch)
