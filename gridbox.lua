@@ -1,6 +1,7 @@
 -- GridBox: CSP online script (the server pushes it to every client through a [SCRIPT_...] block in the CSP extra options).
 -- Each client works out the grid slot of ITS OWN car at the start of a race session (the track's start node AC_START_<n>, n = the
--- session's forcedPosition; if that is -1 or the slot cannot be determined, the spot where the car stands) and shows it (a front line
+-- session's forcedPosition, or the node nearest to the standing car if the server assigns none; if the slot cannot be determined,
+-- the spot where the car stands) and shows it (a front line
 -- with side lines and the grid position, or just the position text) until the lights of tetematete's startLights.lua go out, i.e.
 -- through the formation lap. The lines stay white; the HUD line turns red while the car is outside. If the car is outside when those lights go out, its
 -- client sends a report to everybody (a hidden event, nothing appears in the chat) and the clients of signed-in admins append it to
@@ -23,6 +24,8 @@ local car = ac.getCar(0)
 local cfg = {
   source = 'AUTO',   -- AUTO: the box comes from the track's start slot of this car, from where the car stands if the slot is unknown;
                      -- CAR: always from where the car stands
+  slotRadius = 2,    -- m: with no assigned slot (forcedPosition -1, as on pickup servers) a standing car takes the start slot whose node
+                     -- is nearest, if within this distance; 0 = never, then the box comes from where the car stands
   style = 'BOX',     -- BOX: lines + position text, TEXT: only the position text (the track's own painted boxes stay the reference)
   settle = 1.5,      -- s after a session starts before the box is recorded (cars must be standing still by then)
   still = 3,         -- km/h under which the car counts as standing still
@@ -138,32 +141,70 @@ end
 
 -- The track's start slot of this car: the node AC_START_<n> of the track, n = the session's forcedPosition (-1: not assigned).
 -- Returns the slot number, the node's position and facing, or nothing if the slot cannot be determined.
+local slotWhy = '-' -- DEBUG status: why the last slot lookup found nothing
+
+-- The game puts a start node on a car's PHYSICS origin when it spawns the car (measured with the Tatuus: its model origin, car.position,
+-- sits 0.42 m ahead of the node, which is exactly the GRAPHICS_OFFSET z of its car.ini; the front and rear axle then lie 1.70 m ahead of
+-- and 1.23 m behind the node, which is (1 - CG_LOCATION) and CG_LOCATION of the wheelbase). car.transform is the physics transform.
+local function physicsOrigin() return car.transform and car.transform.position end
+
+-- The start node closest to the car (flat distance): its number, the distance, and how many start nodes the track has.
+local function nearestStart(root)
+  local count = root:findNodes('AC_START_?'):size()
+  local best, bestD
+  local o = physicsOrigin() or car.position
+  for i = 0, count - 1 do
+    local p = root:findNodes('AC_START_' .. i):getPosition()
+    local d = p and math.sqrt((p.x - o.x) ^ 2 + (p.z - o.z) ^ 2)
+    if d and (not bestD or d < bestD) then best, bestD = i, d end
+  end
+  return best, bestD, count
+end
+
 local function slotNode()
   local session = ac.getSession(sim.currentSessionIndex)
   local index = session and session.forcedPosition
-  if not index or index < 0 then return end
+  local assigned = true
+  if not index or index < 0 then
+    assigned = false
+    -- no slot assigned (measured: a pickup server leaves forcedPosition at -1): a standing car takes the start node it stands nearest to
+    local why = 'forcedPosition=' .. tostring(index)
+    if cfg.slotRadius <= 0 then slotWhy = why return end
+    if car.speedKmh >= cfg.still then slotWhy = why .. ', car moving' return end
+    if car.isInPitlane then slotWhy = why .. ', car in the pit lane' return end
+    local best, dist = nearestStart(ac.findNodes('sceneRoot:yes'))
+    if not best or dist > cfg.slotRadius then
+      slotWhy = string.format('%s, nearest start node %s m away', why, dist and string.format('%.1f', dist) or '-')
+      return
+    end
+    index = best
+  end
   local name = string.format('AC_START_%d', index)
   local node = ac.findNodes('sceneRoot:yes'):findNodes(name)
-  if node:name(1) ~= name then return end
+  if node:name(1) ~= name then slotWhy = string.format('no node %s (%d found)', name, node:size()) return end
   local pos, look = node:getPosition(), node:getLook()
-  if pos and look then return index, pos, look end
+  if pos and look then slotWhy = '-' return index, pos, look, assigned end
+  slotWhy = 'node without position'
 end
 
--- The box from the track's start slot (the main way). The car's origin is taken to sit on the node at the spawn, so the front line is
--- the front axle's offset from the car origin (measured on this car, wherever it is now) ahead of the node: it works for a car that
+-- The box from the track's start slot (the main way). The game spawns a car with its physics origin on the node, so the front line is
+-- the front axle's offset from that origin (measured on this car, wherever it is now) ahead of the node: it works for a car that
 -- spun, joined late or reconnected too. Returns nil if the slot cannot be determined.
 local function slotBox()
-  local ok, index, pos, look = pcall(slotNode)
+  local ok, index, pos, look, assigned = pcall(slotNode)
+  if not ok then slotWhy = 'error: ' .. tostring(index) end
   if not ok or not index then return nil end
+  local origin = physicsOrigin()
+  if not origin then slotWhy = 'no physics transform' return nil end
   local c = carGeometry()
   local fwd = look:clone()
   fwd.y = 0
   fwd:normalize()
   local mid = c.front:clone():add(c.rear):scale(0.5)
-  local frontOff = c.front:clone():sub(car.position):dot(c.fwd)
-  local midOff = mid:clone():sub(car.position):dot(c.fwd)
+  local frontOff = c.front:clone():sub(origin):dot(c.fwd)
+  local midOff = mid:clone():sub(origin):dot(c.fwd)
   local g = newGrid(pos:clone():addScaled(fwd, frontOff + cfg.lineOffset + cfg.patch / 2), pos:clone():addScaled(fwd, midOff), fwd,
-    c.wheelbase + 1.8, pos.y, index + 1)
+    c.wheelbase + 1.8, pos.y, assigned and index + 1 or gridPosition()) -- an assigned slot names the position, a nearest node does not (empty entries count)
   g.slot = index
   -- how far the box centre from the slot is from where the car really is: about 0 for a car standing on its spawn spot (DEBUG status)
   if car.speedKmh < cfg.still then g.slotErr = math.sqrt((g.center.x - mid.x) ^ 2 + (g.center.z - mid.z) ^ 2) end
@@ -171,10 +212,9 @@ local function slotBox()
 end
 
 -- The fallback: the box from where the car stands. Returns true if it was recorded.
-local function carBox(anySession)
+local function carBox()
   if car.speedKmh >= cfg.still then return false end
   if car.isInPitlane then return false end -- a late joiner standing in the pits has no grid slot (and must not get a jump start report)
-  if not anySession and sim.raceSessionType ~= ac.SessionType.Race then return false end
   local c = carGeometry()
   -- the front line starts at the front edge of the front tyres' contact patches, so the spawn spot itself is on the line
   local line = c.front:clone():addScaled(c.fwd, cfg.lineOffset + cfg.patch / 2)
@@ -185,10 +225,11 @@ end
 -- Records this car's box: from the track's start slot, or where the car stands if the slot cannot be determined (forcedPosition -1,
 -- no such node, no node API). Returns true if a box was recorded.
 local function record(anySession)
+  if not anySession and sim.raceSessionType ~= ac.SessionType.Race then return false end -- grid boxes are for the race start only
   local g = cfg.source ~= 'CAR' and slotBox()
   if g then
     grid = g
-  elseif not carBox(anySession) then
+  elseif not carBox() then
     return false
   end
   lightsOut = nil
@@ -297,11 +338,21 @@ local function status()
     lightsOut and string.format('%.1f', (lightsOut - sim.currentSessionTime) / 1000) or '-', tostring(lastError))
 end
 
+-- second debug line (the first one is already as wide as the window): why the slot was not used, how many start nodes the track
+-- has and which one is nearest to the car right now
+local function slotStatus()
+  local ok, text = pcall(function()
+    local best, dist, count = nearestStart(ac.findNodes('sceneRoot:yes'))
+    return string.format('start nodes=%d nearest=%s (%.2f m)', count, tostring(best), dist or -1)
+  end)
+  return string.format('why-not-slot=%s  %s', slotWhy, ok and text or ('start nodes: error ' .. tostring(text)))
+end
+
 function script.update(dt)
   local ok, err = pcall(tick, dt)
   if not ok then lastError = tostring(err) end
   ac.debug('gridbox error', lastError)
-  if cfg.debug then ac.debug('gridbox status', status()) end
+  if cfg.debug then ac.debug('gridbox status', status()) ac.debug('gridbox slot', slotStatus()) end
 end
 
 -- 3D boxes ---------------------------------------------------------------------------------------------------------
@@ -338,7 +389,10 @@ render.on('main.track.transparent', drawWorld)
 -- HUD line -------------------------------------------------------------------------------------------------------
 function script.drawUI()
   if cfg.debug then
-    ui.transparentWindow('GridBoxDebug', vec2(20, 60), vec2(760, 30), true, false, function() ui.textColored(status(), COL_TXT) end)
+    ui.transparentWindow('GridBoxDebug', vec2(20, 60), vec2(760, 50), true, false, function()
+      ui.textColored(status(), COL_TXT)
+      ui.textColored(slotStatus(), COL_TXT)
+    end)
   end
   if not grid or not grid.shown then return end
   local dist = grid.center:distance(car.position)
@@ -436,6 +490,7 @@ end)
 
 ac.onOnlineWelcome(function(message, config)
   cfg.source = config:get('GRIDBOX', 'SOURCE', cfg.source):upper()
+  cfg.slotRadius = config:get('GRIDBOX', 'SLOT_RADIUS_M', cfg.slotRadius)
   cfg.style = config:get('GRIDBOX', 'STYLE', cfg.style):upper()
   cfg.settle = config:get('GRIDBOX', 'SETTLE_SECONDS', cfg.settle)
   cfg.still = config:get('GRIDBOX', 'STILL_KMH', cfg.still)

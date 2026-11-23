@@ -13,13 +13,13 @@ It follows the lights of [tetematete's startLights.lua](https://github.com/tetem
 ## Install (server admin)
 
 1. Use the raw link of one release of `gridbox.lua`:
-   `https://raw.githubusercontent.com/Equin0oX/ac-gridbox/refs/tags/v1.0/gridbox.lua`
+   `https://raw.githubusercontent.com/Equin0oX/ac-gridbox/refs/tags/v1.1/gridbox.lua`
    (or download the file from this page, host it somewhere public yourself and use that link).
 2. In your server manager (ACSM: the event's CSP extra options box; Content Manager: the server preset's CSP extra options) add:
 
 ```ini
 [SCRIPT_...]
-SCRIPT = "https://raw.githubusercontent.com/Equin0oX/ac-gridbox/refs/tags/v1.0/gridbox.lua"
+SCRIPT = "https://raw.githubusercontent.com/Equin0oX/ac-gridbox/refs/tags/v1.1/gridbox.lua"
 
 [GRIDBOX]
 FINAL_REPORT=1
@@ -27,7 +27,7 @@ FINAL_REPORT=1
 
 Keep the section name exactly `[SCRIPT_...]`, as for your other scripts. Players need CSP with online scripts (0.1.76 or newer; tested on 0.3.0-preview212). All tests ran on a CSP-only server (track name `csp/<build>/../<options>/../<track>`) with the literal `[SCRIPT_...]` section; whether a normal server loads the script too has not been tried.
 
-Do not use a link with `refs/heads/main` on a live server: the script then changes whenever someone pushes to this repository, and it runs on every player's PC. The `v1.0` link never changes. For a newer version, read the changes and switch to its tag. Anyone who can edit the file behind the link runs code on every player's PC, so keep two-factor login on the account that owns it.
+Do not use a link with `refs/heads/main` on a live server: the script then changes whenever someone pushes to this repository, and it runs on every player's PC. The `v1.1` link never changes. For a newer version, read the changes and switch to its tag. Do not use `v1.0`: its slot box sits 0.42 m behind a car on the Tatuus and would report a correctly parked car as over the line. Anyone who can edit the file behind the link runs code on every player's PC, so keep two-factor login on the account that owns it.
 
 ## Use
 
@@ -69,6 +69,7 @@ Every driver's PC decides about itself and sends its own report. A stock server 
 | Key | Default | Meaning |
 |---|---|---|
 | SOURCE | AUTO | `AUTO` the box comes from the track's start slot, from where the car stands if the slot is unknown; `CAR` always from where the car stands |
+| SLOT_RADIUS_M | 2 | if the server assigns no slot (pickup servers), a standing car takes the start slot whose node is nearest, if within this distance; `0` = never |
 | STYLE | BOX | `BOX` lines + position text, `TEXT` only the position text (nothing is checked then) |
 | FINAL_REPORT | 1 | report drivers who are outside at lights out |
 | JUMP_REPORT | 1 | report a car that moves before the lights go out (after it stood in its box) |
@@ -88,10 +89,15 @@ A tyre is outside when any part of its contact patch is beyond the outer edge of
 ## Limits
 
 - A client sends a box, a report or a command at most a few times a second; a stock server drops faster events, so GridBox queues them and retries.
-- The box comes from the track's start slot (the `AC_START_n` node of the session's forced position). This assumes that slot lines up with the painted boxes and the car's spawn spot; it was checked only with fake data, not yet on a real track. Check it once on your track with `DEBUG=1`: the status line shows `slotErr`, the distance between the slot and where the car stood. If it is large, use `SOURCE=CAR` (or `STYLE=TEXT` where the painted boxes are good) and tune `LINE_OFFSET_M`.
+- The box comes from the track's start slot: the `AC_START_n` node of the session's forced position or, when the server assigns none (measured: a stock pickup server leaves it at -1), the start node nearest to the standing car. The game spawns a car with its physics origin on that node (measured with the Tatuus: slot error 0.01 m for a car parked where it spawned), and GridBox measures the car's axles from that origin. It does not know where the painted boxes are: on a track whose paint does not match the start nodes, use `STYLE=TEXT` or tune `LINE_OFFSET_M`. Check your track once with `DEBUG=1`: the status line shows `from=slot N` and `slotErr`, the distance between the slot and where the car stood (about 0 for a car parked where it spawned). If it is large, use `SOURCE=CAR`.
 - The paint itself is a texture and cannot be read.
 - In the fallback (no start slot), a driver who reconnects after the session start, or who stands in the pit lane or is still moving when the session starts, gets no box until an admin records again.
 - It listens to the event of startLights.lua (key `Start Lights`); a changed layout there breaks the link, the show/hide buttons keep working.
+
+## Versions
+
+- v1.1: the slot box is measured from the car's physics origin (v1.0 was 0.42 m off on the Tatuus); with no assigned slot (pickup servers) a standing car takes the nearest start node; boxes are only recorded in a race session.
+- v1.0: first release with the slot box. Do not use.
 
 ## Develop
 

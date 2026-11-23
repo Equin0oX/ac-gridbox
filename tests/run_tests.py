@@ -32,6 +32,7 @@ function CAR:driverName() return 'Test Driver' end
 -- car centre (cx, cz) heading +x, wheelbase 2.7 m, wheel centres 0.3 m above ground
 function place(cx, cz)
   CAR.position = vec3(cx, 0, cz)
+  CAR.transform = {position = CAR.position} -- physics origin = model origin unless a test moves it
   local function wheel(x, z) return {position = vec3(x, 0.3, z), contactPoint = vec3(x, 0, z), tyreRadius = 0.3, tyreWidth = 0.25} end
   CAR.wheels = {[0] = wheel(cx + 1.35, cz - 0.8), [1] = wheel(cx + 1.35, cz + 0.8), [2] = wheel(cx - 1.35, cz - 0.8), [3] = wheel(cx - 1.35, cz + 0.8)}
 end
@@ -40,6 +41,7 @@ function place_yaw(cx, cz, deg)
   local a = math.rad(deg)
   local cs, sn = math.cos(a), math.sin(a)
   CAR.position = vec3(cx, 0, cz)
+  CAR.transform = {position = CAR.position}
   local function wheel(lx, lz) local x, z = cx + lx * cs - lz * sn, cz + lx * sn + lz * cs return {position = vec3(x, 0.3, z), contactPoint = vec3(x, 0, z), tyreRadius = 0.3, tyreWidth = 0.25} end
   CAR.wheels = {[0] = wheel(1.35, -0.8), [1] = wheel(1.35, 0.8), [2] = wheel(-1.35, -0.8), [3] = wheel(-1.35, 0.8)}
 end
@@ -64,9 +66,10 @@ SLOT = -1
 NODES = {[0] = {pos = vec3(100, 0, 50), look = vec3(1, 0, 0)}, [1] = {pos = vec3(94, 0, 53), look = vec3(1, 0, 0)}}
 function ac.getSession(i) return {forcedPosition = SLOT} end
 ROOT = {findNodes = function(self, q)
+  if q == 'AC_START_?' then return {size = function() return 2 end} end
   local i = tonumber(q:match('^AC_START_(%d+)$'))
   local n = i and NODES[i]
-  return {name = function() return n and q or '' end, getPosition = function() return n and n.pos end, getLook = function() return n and n.look end}
+  return {name = function() return n and q or '' end, size = function() return n and 1 or 0 end, getPosition = function() return n and n.pos end, getLook = function() return n and n.look end}
 end}
 function ac.findNodes(q) return ROOT end
 OTHER = {index = 1, sessionID = 4} -- another driver's car as an event sender
@@ -159,9 +162,9 @@ lua = make(); lua.execute("GROUND = function(x, z) return 0.02 * (x - 100) end; 
 ys = [p[3] for q in (2,) for p in lua.eval("QV[%d]" % q).values()]
 check(abs(ys[0] - (0.02 * 1.4 + 0.01)) < 1e-6 and abs(ys[1] - (0.02 * (101.4 - 4.5 - 100) + 0.01)) < 1e-6,
       "on a slope each corner follows the road: front end 0.038, rear end -0.052")
-lua = make(); lua.execute("render.createRay = nil; CAR.position.y = -0.2; for k = 0, 3 do CAR.wheels[k].contactPoint.y = -0.05 end; SESSION_CB(1, false); run(2); frame()")
+lua = make({"SOURCE": "car"}); lua.execute("render.createRay = nil; CAR.position.y = -0.2; for k = 0, 3 do CAR.wheels[k].contactPoint.y = -0.05 end; SESSION_CB(1, false); run(2); frame()")
 check(abs(n(lua, "QUADY") + 0.04) < 1e-6, "no ray available: falls back to the average contact point height (-0.05) + 1 cm")
-lua = make(); lua.execute("render.createRay = nil; for k = 0, 3 do CAR.wheels[k].contactPoint = nil end; SESSION_CB(1, false); run(2); frame()")
+lua = make({"SOURCE": "car"}); lua.execute("render.createRay = nil; for k = 0, 3 do CAR.wheels[k].contactPoint = nil end; SESSION_CB(1, false); run(2); frame()")
 check(abs(n(lua, "QUADY") - 0.01) < 1e-6, "no ray and no contact points: falls back to wheel centre minus tyre radius (0.3 - 0.3) + 1 cm")
 lua = make(); start_race(lua)
 
@@ -311,7 +314,7 @@ lua = make({"DEBUG": 1}); lua.execute("SIM.raceSessionType = 1; SESSION_CB(1, fa
 check(n(lua, "MSG[1]") == "GridBox:script loaded", "DEBUG=1: 'script loaded' message at join")
 check(n(lua, "HUD[1][1]").startswith("GridBox debug: session=1") and "box=no" in n(lua, "HUD[1][1]"), "DEBUG=1: status line shows without a box")
 lua.execute("SIM.raceSessionType = 3; SESSION_CB(2, false); run(2); lights(5000, 1000); frame()")
-check("box=yes from=car slotErr=- shown=true over=-0.040 side=" in n(lua, "HUD[1][1]") and "lights-out in 6.0 s" in n(lua, "HUD[1][1]") and n(lua, "#QUADS") == 3,
+check("box=yes from=slot 0 slotErr=0.00 shown=true over=-0.040 side=" in n(lua, "HUD[1][1]") and "lights-out in 6.0 s" in n(lua, "HUD[1][1]") and n(lua, "#QUADS") == 3,
       "DEBUG=1: status line shows the box state, the over/side margins in metres and the lights countdown")
 
 # 18 slot mode (the main way): the box comes from the track's start slot of this car (forcedPosition), not from where the car stands
@@ -333,6 +336,36 @@ lua = make(); lua.execute("SLOT = -1"); start_race(lua); lua.execute("frame()")
 check(abs(max(xs(2)) - 101.44) < 1e-6 and n(lua, "LABELS[1]") == "P1  YOUR BOX", "forcedPosition -1: the box stands where the car stands")
 lua = make(); lua.execute("SLOT = 7"); start_race(lua); lua.execute("frame()")
 check(abs(max(xs(2)) - 101.44) < 1e-6, "a forcedPosition without a start node: the box stands where the car stands")
+for slot, setup, why in ((-1, "place(200, 200)", "why-not-slot=forcedPosition=-1, nearest start node 180.3 m away"),
+                         (7, "", "why-not-slot=no node AC_START_7 (0 found)"),
+                         (0, "ac.findNodes = nil", "why-not-slot=error:")):
+    lua = make({"DEBUG": 1}); lua.execute("SLOT = %d; %s" % (slot, setup)); start_race(lua); lua.execute("frame()")
+    check(why in n(lua, "HUD[2][1]"), "DEBUG second line says why the slot was not used: " + why)
+lua = make({"DEBUG": 1}); lua.execute("SLOT = -1"); start_race(lua); lua.execute("frame()")
+check("start nodes=2 nearest=0 (0.00 m)" in n(lua, "HUD[2][1]"), "DEBUG second line counts the track's start nodes and names the one nearest to the car")
+# the game spawns the PHYSICS origin on the node; the model origin can sit ahead of it (Tatuus: 0.42 m, its graphics offset). Measured in game:
+# model origin 0.42 m ahead of node 0, front axle 1.28 m ahead of the model origin. The box must then be the one of a car parked at the spawn.
+spawn = ("place(100.42, 50); CAR.transform = {position = vec3(100, 0, 50)}; for k = 0, 3 do local w = CAR.wheels[k] "
+         "w.position.x = w.position.x - 0.07; w.contactPoint.x = w.contactPoint.x - 0.07 end")  # axles 1.28 ahead / 1.42 behind the model origin
+lua = make({"DEBUG": 1}); lua.execute("SLOT = -1; " + spawn); start_race(lua); lua.execute("frame()")
+check("from=slot 0 slotErr=0.00" in n(lua, "HUD[1][1]") and "over=-0.040" in n(lua, "HUD[1][1]"),
+      "model origin 0.42 m ahead of the node: the box is measured from the physics origin, a car on its spawn spot is inside (over -0.04, slotErr 0)")
+lua = make(); lua.execute("SLOT = -1; " + spawn + "; CAR.transform = nil"); start_race(lua); lua.execute("frame()")
+check(n(lua, "#QUADS") == 3, "no physics transform: no slot box, the car's own spot is used")
+# 18c no slot assigned (forcedPosition -1, a pickup server): a standing car takes the start node it stands nearest to
+lua = make({"DEBUG": 1}); lua.execute("SLOT = -1"); start_race(lua); lua.execute("frame()")
+check("from=slot 0 slotErr=0.00" in n(lua, "HUD[1][1]") and n(lua, "LABELS[1]") == "P1  YOUR BOX", "forcedPosition -1, car on node 0: the box comes from node 0")
+lua = make(); lua.execute("SLOT = -1; place(94.4, 53.3)"); start_race(lua); lua.execute("frame()")
+check(abs(max(xs(2)) - 95.44) < 1e-6 and n(lua, "LABELS[1]") == "P1  YOUR BOX",
+      "car 0.5 m from node 1: the box stands at node 1, labelled by the grid position among connected cars (P1), not node number + 1")
+lua = make({"DEBUG": 1}); lua.execute("SLOT = -1; place(97, 50)"); start_race(lua); lua.execute("frame()")
+check("from=car" in n(lua, "HUD[1][1]") and abs(max(xs(2)) - 98.44) < 1e-6, "car 3 m from the nearest node (radius 2 m): the box stands where the car stands")
+lua = make({"SLOT_RADIUS_M": 0, "DEBUG": 1}); lua.execute("SLOT = -1"); start_race(lua); lua.execute("frame()")
+check("from=car" in n(lua, "HUD[1][1]") and "why-not-slot=forcedPosition=-1" in n(lua, "HUD[2][1]"), "SLOT_RADIUS_M=0 switches the nearest node off")
+lua = make({"DEBUG": 1}); lua.execute("SLOT = -1; CAR.isInPitlane = true"); start_race(lua); lua.execute("frame()")
+check("car in the pit lane" in n(lua, "HUD[2][1]") and n(lua, "#QUADS") == 0, "a car in the pit lane takes no start node")
+lua = make(); lua.execute("SLOT = -1; SIM.raceSessionType = 1; SESSION_CB(1, false); run(2); frame()")
+check(n(lua, "#QUADS") == 0, "practice session: no box from a start node either")
 lua = make(); lua.execute("SLOT = 0; ac.findNodes = nil"); start_race(lua); lua.execute("frame()")
 check(abs(max(xs(2)) - 101.44) < 1e-6, "no node API at all: the box stands where the car stands, nothing breaks")
 lua = make({"SOURCE": "car"}); lua.execute("SLOT = 1"); start_race(lua); lua.execute("frame()")
