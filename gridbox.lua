@@ -590,5 +590,10 @@ ac.onOnlineWelcome(function(message, config)
     local function nudge(d) cfg.lineOffset = cfg.lineOffset + d record(true) end
     admin('Grid debug: front line 5 cm forward', function() nudge(0.05) end)
     admin('Grid debug: front line 5 cm back', function() nudge(-0.05) end)
+    -- test aid when a test driver cannot drive to the grid: put the own car on its start slot (the game's START spawn set)
+    admin('Grid debug: teleport my car to the start grid', function()
+      physics.teleportCarTo(0, ac.SpawnSet.Start)
+      dlog('teleported the own car to the start grid')
+    end)
   end
 end)

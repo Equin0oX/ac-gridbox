@@ -86,7 +86,7 @@ Every driver's PC decides about itself and sends its own report. A stock server 
 | SETTLE_SECONDS | 1.5 | seconds after a session starts before the box is recorded |
 | STILL_KMH | 3 | speed under which a car counts as standing still |
 | NEAR_M | 20 | a standing car is checked only within this distance of its box |
-| DEBUG | 0 | a status line with the measured margins (`over=`, `side=`) and where the box came from (`from=slot N` or `from=car`), a second line with why a slot was not used, the start-node count and `line-offset`; yellow crosses and names on the track's start nodes near the car; two admin buttons to nudge the front line by 5 cm; and a line in the CSP log (`Documents\Assetto Corsa\logs\custom_shaders_patch.log`) for the recording, Start Lights event, lights out, reports and admin commands |
+| DEBUG | 0 | a status line with the measured margins (`over=`, `side=`) and where the box came from (`from=slot N` or `from=car`), a second line with why a slot was not used, the start-node count and `line-offset`; yellow crosses and names on the track's start nodes near the car; two admin buttons to nudge the front line by 5 cm; an admin button that teleports your own car to the start grid (for tests); and a line in the CSP log (`Documents\Assetto Corsa\logs\custom_shaders_patch.log`) for the recording, Start Lights event, lights out, reports and admin commands |
 
 A tyre is outside when any part of its contact patch is beyond the outer edge of the front line or a side line. A car standing too sideways counts too.
 

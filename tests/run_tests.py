@@ -48,7 +48,9 @@ end
 place(100, 50)
 
 CHAT, HUD, QUADS, LABELS, DEBUG, BUTTONS, MSG, HUDOFF, EVENTS, QV = {}, {}, {}, {}, {}, {}, {}, {}, {}, {}
-ac = {SessionType = {Race = 3, Practice = 1, Qualify = 2}, SharedNamespace = {ServerScript = 'server_script'}, StructItem = {}}
+TELEPORTS = {}
+physics = {teleportCarTo = function(i, set) TELEPORTS[#TELEPORTS + 1] = {i, set} end}
+ac = {SpawnSet = {Start = 'START', Pits = 'PIT'}, SessionType = {Race = 3, Practice = 1, Qualify = 2}, SharedNamespace = {ServerScript = 'server_script'}, StructItem = {}}
 function ac.getSim() return SIM end
 function ac.getCar(i) if i == 0 then return CAR end return OTHERS[i] end
 function ac.getUI() return {uiScale = 1} end
@@ -477,6 +479,13 @@ lua = make({"RECORD_IN": "PRACTICE", "DEBUG": 1}); lua.execute("SLOT = -1; CAR.i
 check(n(lua, "#QUADS") == 0 and "car in the pit lane" in n(lua, "HUD[2][1]"), "practice start in the pit lane: no box (a car in the pit lane takes no start node)")
 lua = make({"RECORD_IN": "PRACTICE"}); lua.execute(practice + "; SIM.raceSessionType = 3; SESSION_CB(2, false); frame()")
 check(n(lua, "#QUADS") == 0, "a box recorded in practice is gone when the race starts (and RECORD_IN=PRACTICE does not record the race)")
+
+# 26 DEBUG test aid: teleport the own car to the start grid
+lua = make(); start_race(lua)
+check(n(lua, "#TELEPORTS") == 0 and n(lua, "#BUTTONS") == 5, "DEBUG off: no teleport button")
+lua = make({"DEBUG": 1}); start_race(lua); lua.execute("button('Grid debug: teleport my car to the start grid')")
+check(n(lua, "#TELEPORTS") == 1 and n(lua, "TELEPORTS[1][1]") == 0 and n(lua, "TELEPORTS[1][2]") == "START"
+      and "teleported the own car to the start grid" in logtext(lua), "DEBUG: the teleport button puts car 0 on the START spawn set and logs it")
 
 print("\n%d failed" % len(fails) if fails else "\nall passed")
 raise SystemExit(1 if fails else 0)

@@ -2,7 +2,7 @@
 # Lives outside OneDrive on purpose (a junction to the game content inside OneDrive could get synced).
 # usage: python gridbox\testserver\setup_testserver.py      (safe to re-run: rewrites cfg, welcome text and the deployed script)
 # then:  F:\gridbox_testserver\run_server.bat   and join  acmanager://race/online/join?ip=127.0.0.1&httpPort=8091
-# Sessions: Practice 3 min (join and load in here), then a 20-lap Race (Bowman Gray is ~15 s a lap: room for several formation laps)
+# Sessions: Practice 3 min, or GRIDBOX_PRACTICE_MIN (join and load in here), then a 20-lap Race (Bowman Gray is ~15 s a lap: room for several formation laps)
 # with the server's minimum 20 s grid wait, 10 s after the race, then it loops.
 # The session timers run from server start even with nobody connected, so join right after starting the server.
 # The admin password is made up on every run and printed at the end: in the game chat type /admin <password>, then use /next_session
@@ -20,6 +20,7 @@ CAR = "tatuus_ft_60K"
 # rt_autodrom_most + no_chicane (a track with painted grid boxes); LAYOUT is empty for a track without layouts.
 TRACK = os.environ.get("GRIDBOX_TRACK", "aa_bgs")
 LAYOUT = os.environ.get("GRIDBOX_LAYOUT", "")
+PRACTICE_MIN = os.environ.get("GRIDBOX_PRACTICE_MIN", "3")  # length of the practice session in minutes
 SCRIPT_SRC = os.path.join(HERE, "..", "gridbox.lua")
 SCRIPT_DST = os.path.join(GAME, "extension", "lua", "online", "gridbox.lua")  # SCRIPT = gridbox.lua is read from here
 
@@ -46,6 +47,8 @@ F1_STYLE=0
 FINAL_REPORT=1
 DEBUG=1
 """
+# more [GRIDBOX] lines for one test, separated by ;  for example  GRIDBOX_SETTINGS="LINE_FROM_NODE_M=2.40;RECORD_IN=PRACTICE,RACE"
+EXTRA_OPTIONS += "".join(line.strip() + "\n" for line in os.environ.get("GRIDBOX_SETTINGS", "").split(";") if line.strip())
 
 # TRACK=csp/<build>/../<options>/../<track> is the CSP-only server name Content Manager writes (CSP wiki, "CSP-only servers and core options").
 # 3465 is the build Rain Racers requires; the core option B (as on Rain Racers) is part of the same change.
@@ -95,7 +98,7 @@ WELCOME_MESSAGE=cfg/welcome.txt
 
 [PRACTICE]
 NAME=Practice
-TIME=3
+TIME=@PRACTICE@
 IS_OPEN=1
 
 [RACE]
@@ -181,7 +184,7 @@ def main():
     subprocess.run(["cmd", "/c", "mklink", "/J", link, os.path.join(GAME, "content", "cars", CAR)], check=True)
     for name, text in (("server_cfg.ini", SERVER_CFG), ("entry_list.ini", ENTRY_LIST),
                        ("welcome.txt", welcome_text("GridBox test server\n", EXTRA_OPTIONS))):
-        text = text.replace("@CAR@", CAR).replace("@TRACK@", TRACK).replace("@LAYOUT@", LAYOUT).replace("@PASSWORD@", password)
+        text = text.replace("@CAR@", CAR).replace("@TRACK@", TRACK).replace("@LAYOUT@", LAYOUT).replace("@PASSWORD@", password).replace("@PRACTICE@", PRACTICE_MIN)
         with open(os.path.join(DEST, "cfg", name), "w", encoding="utf-8", newline="\n") as f:
             f.write(text)
     with open(os.path.join(DEST, "run_server.bat"), "w", newline="\r\n") as f:
