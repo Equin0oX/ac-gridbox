@@ -48,7 +48,7 @@ end
 place(100, 50)
 
 CHAT, HUD, QUADS, LABELS, DEBUG, BUTTONS, MSG, HUDOFF, EVENTS, QV = {}, {}, {}, {}, {}, {}, {}, {}, {}, {}
-ac = {SessionType = {Race = 3, Practice = 1}, SharedNamespace = {ServerScript = 'server_script'}, StructItem = {}}
+ac = {SessionType = {Race = 3, Practice = 1, Qualify = 2}, SharedNamespace = {ServerScript = 'server_script'}, StructItem = {}}
 function ac.getSim() return SIM end
 function ac.getCar(i) if i == 0 then return CAR end return OTHERS[i] end
 function ac.getUI() return {uiScale = 1} end
@@ -460,6 +460,23 @@ lua = make({"LINE_FROM_NODE_M": 2.4, "DEBUG": 1}); start_race(lua); lua.execute(
 check("line-from-node=2.45 m" in n(lua, "HUD[2][1]") and abs(max(xs(2)) - 102.49) < 1e-6, "LINE_FROM_NODE_M with the nudge button: 2.45 m shown, the line moves 5 cm")
 lua = make({"DEBUG": 1}); start_race(lua); lua.execute("frame()")
 check("line-from-node=1.40 m" in n(lua, "HUD[2][1]"), "DEBUG shows the distance of the front line from the node (1.40 m for this car without the setting): the value to put in LINE_FROM_NODE_M")
+
+# 25 RECORD_IN: the sessions in which the box is recorded by itself (default: the race only; an admin can always record by hand)
+practice = "SIM.raceSessionType = 1; SESSION_CB(1, false); run(2); frame()"
+lua = make(); lua.execute(practice)
+check(n(lua, "#QUADS") == 0, "default RECORD_IN=RACE: nothing is recorded by itself in a practice session")
+lua = make({"RECORD_IN": "practice"}); lua.execute(practice)
+check(n(lua, "#QUADS") == 3, "RECORD_IN=practice (any case): the box is recorded in a practice session")
+lua = make({"RECORD_IN": "Practice, Race"}); start_race(lua); lua.execute("frame()")
+check(n(lua, "#QUADS") == 3, "RECORD_IN=Practice, Race: the race still records")
+lua = make({"RECORD_IN": "PRACTICE"}); start_race(lua); lua.execute("frame()")
+check(n(lua, "#QUADS") == 0, "RECORD_IN=PRACTICE only: the race does not record by itself")
+lua = make({"RECORD_IN": "QUALIFY"}); lua.execute("SIM.raceSessionType = 2; SESSION_CB(1, false); run(2); frame()")
+check(n(lua, "#QUADS") == 3, "RECORD_IN=QUALIFY: the box is recorded in a qualifying session")
+lua = make({"RECORD_IN": "PRACTICE", "DEBUG": 1}); lua.execute("SLOT = -1; CAR.isInPitlane = true; " + practice)
+check(n(lua, "#QUADS") == 0 and "car in the pit lane" in n(lua, "HUD[2][1]"), "practice start in the pit lane: no box (a car in the pit lane takes no start node)")
+lua = make({"RECORD_IN": "PRACTICE"}); lua.execute(practice + "; SIM.raceSessionType = 3; SESSION_CB(2, false); frame()")
+check(n(lua, "#QUADS") == 0, "a box recorded in practice is gone when the race starts (and RECORD_IN=PRACTICE does not record the race)")
 
 print("\n%d failed" % len(fails) if fails else "\nall passed")
 raise SystemExit(1 if fails else 0)

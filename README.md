@@ -13,13 +13,13 @@ It follows the lights of [tetematete's startLights.lua](https://github.com/tetem
 ## Install (server admin)
 
 1. Use the raw link of one release of `gridbox.lua`:
-   `https://raw.githubusercontent.com/Equin0oX/ac-gridbox/refs/tags/v1.4/gridbox.lua`
+   `https://raw.githubusercontent.com/Equin0oX/ac-gridbox/refs/tags/v1.5/gridbox.lua`
    (or download the file from this page, host it somewhere public yourself and use that link).
 2. In your server manager (ACSM: the event's CSP extra options box; Content Manager: the server preset's CSP extra options) add:
 
 ```ini
 [SCRIPT_...]
-SCRIPT = "https://raw.githubusercontent.com/Equin0oX/ac-gridbox/refs/tags/v1.4/gridbox.lua"
+SCRIPT = "https://raw.githubusercontent.com/Equin0oX/ac-gridbox/refs/tags/v1.5/gridbox.lua"
 
 [GRIDBOX]
 FINAL_REPORT=1
@@ -27,7 +27,7 @@ FINAL_REPORT=1
 
 Keep the section name exactly `[SCRIPT_...]`, as for your other scripts. Players need CSP with online scripts. It was tested on 0.3.0-preview212; tetematete's wiki reports other online scripts working back to build 3465 (0.2.11). CSP builds from 0.2.12-preview1 to 0.3.0-preview139 with the new main menu have a bug that breaks `ac.onOnlineWelcome`: GridBox would then run with its default settings and show no admin buttons. To keep such builds out, use tetematete's Force CSP Version script (`[CSPVERSION] VERSION=...`). All tests ran on a CSP-only server (track name `csp/<build>/../<options>/../<track>`) with the literal `[SCRIPT_...]` section; whether a normal server loads the script too has not been tried.
 
-Do not use a link with `refs/heads/main` on a live server: the script then changes whenever someone pushes to this repository, and it runs on every player's PC. The `v1.4` link never changes. For a newer version, read the changes and switch to its tag. Do not use `v1.0`: its slot box sits 0.42 m behind a car on the Tatuus and would report a correctly parked car as over the line. Anyone who can edit the file behind the link runs code on every player's PC, so keep two-factor login on the account that owns it.
+Do not use a link with `refs/heads/main` on a live server: the script then changes whenever someone pushes to this repository, and it runs on every player's PC. The `v1.5` link never changes. For a newer version, read the changes and switch to its tag. Do not use `v1.0`: its slot box sits 0.42 m behind a car on the Tatuus and would report a correctly parked car as over the line. Anyone who can edit the file behind the link runs code on every player's PC, so keep two-factor login on the account that owns it.
 
 Optional: add `REQUIRED=1` to the `[SCRIPT_...]` block and CSP closes the game of a player whose copy of the script cannot load, so nobody races without boxes.
 
@@ -71,6 +71,7 @@ Every driver's PC decides about itself and sends its own report. A stock server 
 | Key | Default | Meaning |
 |---|---|---|
 | SOURCE | AUTO | `AUTO` the box comes from the track's start slot, from where the car stands if the slot is unknown; `CAR` always from where the car stands |
+| RECORD_IN | RACE | the sessions in which boxes are recorded by themselves at the session start: any of `PRACTICE`, `QUALIFY`, `RACE`, separated by commas (`PRACTICE,RACE` for practice start drills). Cars standing in the pit lane get no box when no slot is assigned. An admin can always record with the button, in any session. A box is dropped when the next session starts |
 | SLOT_RADIUS_M | 2 | if the server assigns no slot (pickup servers), a standing car takes the start slot whose node is nearest, if within this distance; `0` = never |
 | STYLE | BOX | `BOX` lines + position text, `TEXT` only the position text (nothing is checked then) |
 | FINAL_REPORT | 1 | report drivers who are outside at lights out |
@@ -105,6 +106,7 @@ Measured: Autodrom Most (`rt_autodrom_most`) with the Tatuus FT-60K: the line li
 
 ## Versions
 
+- v1.5: `RECORD_IN` lets boxes be recorded by themselves in practice and qualifying sessions, not only in the race.
 - v1.4: `LINE_FROM_NODE_M` puts the front line a fixed distance ahead of the start node for every car model; the debug status and log show `line-from-node=`.
 - v1.3: with `DEBUG=1` the script writes its steps to the CSP log, marks the track's start nodes and has two admin buttons to nudge the front line, to fit `LINE_OFFSET_M` to a track (README: "Fit the line to a track"; Autodrom Most with the Tatuus: 0.65). The test rig can use another track.
 - v1.2: a jump start in an `F1_STYLE` start is reported without a meaningless "32000 ms"; README: CSP version bug, where the admin buttons are, `REQUIRED=1`.

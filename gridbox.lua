@@ -26,6 +26,8 @@ local cfg = {
                      -- CAR: always from where the car stands
   slotRadius = 2,    -- m: with no assigned slot (forcedPosition -1, as on pickup servers) a standing car takes the start slot whose node
                      -- is nearest, if within this distance; 0 = never, then the box comes from where the car stands
+  recordIn = 'RACE', -- sessions in which the box is recorded by itself at the session start: PRACTICE, QUALIFY, RACE (any of them, upper case,
+                     -- separated by commas). An admin can always record with the button, in any session
   style = 'BOX',     -- BOX: lines + position text, TEXT: only the position text (the track's own painted boxes stay the reference)
   settle = 1.5,      -- s after a session starts before the box is recorded (cars must be standing still by then)
   still = 3,         -- km/h under which the car counts as standing still
@@ -234,10 +236,17 @@ local function carBox()
   return true
 end
 
+-- Is the current session one of those RECORD_IN names (PRACTICE, QUALIFY, RACE)?
+local function recordsHere()
+  local t = sim.raceSessionType
+  local name = t == ac.SessionType.Race and 'RACE' or t == ac.SessionType.Practice and 'PRACTICE' or t == ac.SessionType.Qualify and 'QUALIFY'
+  return name and cfg.recordIn:find(name, 1, true) ~= nil
+end
+
 -- Records this car's box: from the track's start slot, or where the car stands if the slot cannot be determined (forcedPosition -1,
 -- no such node, no node API). Returns true if a box was recorded.
 local function record(anySession)
-  if not anySession and sim.raceSessionType ~= ac.SessionType.Race then return false end -- grid boxes are for the race start only
+  if not anySession and not recordsHere() then return false end -- grid boxes are for the sessions named in RECORD_IN (default: the race)
   local g = cfg.source ~= 'CAR' and slotBox()
   if g then
     grid = g
@@ -542,6 +551,7 @@ end)
 
 ac.onOnlineWelcome(function(message, config)
   cfg.source = config:get('GRIDBOX', 'SOURCE', cfg.source):upper()
+  cfg.recordIn = config:get('GRIDBOX', 'RECORD_IN', cfg.recordIn):upper()
   cfg.slotRadius = config:get('GRIDBOX', 'SLOT_RADIUS_M', cfg.slotRadius)
   cfg.style = config:get('GRIDBOX', 'STYLE', cfg.style):upper()
   cfg.settle = config:get('GRIDBOX', 'SETTLE_SECONDS', cfg.settle)
