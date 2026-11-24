@@ -37,6 +37,12 @@ The test server sets `DEBUG=1`: the status line shows `from=slot N slotErr=...` 
 
 Start lights: the test server also runs tetematete's `startLights.lua` from its public GitHub link. GridBox listens to its `Start Lights` event (same key and layout), so a layout change there breaks the link.
 
+## Tools for a test with several drivers
+
+`tools/analyze_log.py <csp log>` prints the timeline of a start from the `GridBox:` lines of a DEBUG=1 log and recomputes who was outside or moving from the tyre positions logged at the lights-out (same maths as `measure()`; the defaults for tyre width, patch, box width and line width are at the top of the file). `tools/collect_logs.ps1` copies the CSP log and the report file; `tools/watch_logs.ps1` runs in the background and keeps copies, also across a game restart. The unit tests build a 3-car log with the harness stubs; extend the stubs (`OTHERS`) when a new log line needs more car fields.
+
+CSP lists: an INI value with commas is a list; `config:get(section, key, default)` returns only the first item, the rest comes with the 4th argument (`offset`). v1.5 lost the race from `RECORD_IN=PRACTICE,RACE` this way; the test stub of the INI config now behaves like that.
+
 ## How the box is found
 
 `record()` works only in the sessions named in `RECORD_IN` (default `RACE`; an admin's re-record works in any). It tries the track's start slot first: `ac.getSession(sim.currentSessionIndex).forcedPosition` is taken as the 0-based number n of the node `AC_START_n`, the front line goes at the node plus the front-axle offset, and the label is n+1. Measured on the test rig (stock pickup server): `forcedPosition` is -1, so a standing car outside the pit lane takes the start node nearest to it (`SLOT_RADIUS_M`, default 2 m; all nodes are listed with `findNodes('AC_START_?')`, as in tetematete's `getBoxes`), labelled by its grid position among the connected cars. If no node is near enough, the node API is unavailable or the car is moving, it falls back to the car: a standing car, outside the pit lane (tried again every 0.5 s for 3 s). `SOURCE=CAR` skips the slot.

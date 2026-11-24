@@ -51,21 +51,68 @@ local showAll, others = false, {} -- admin only: draw every driver's box, the bo
 local outbox = {} -- events waiting to be sent: a stock server accepts one per 200 ms and the send function answers false when it refuses
 local reportEvent, shareEvent -- defined with the other events below
 local startNodes -- DEBUG: the track's start nodes, read once per session (drawStartNodes)
+local debugEvent -- DEBUG: every client's status snapshots, defined with the other events below
+local sessionInfoDue, rec = false, nil -- DEBUG: log the session once its settings are known; the flight recorder (see recorderStart)
+local lastLoggedError
 local COL_OK, COL_OVER, COL_TXT = rgbm(0.2, 1, 0.4, 1), rgbm(1, 0.15, 0.1, 1), rgbm(1, 1, 1, 1) -- HUD colours; the lines are COL_TXT, always white
 
--- DEBUG=1: a line in the CSP log (Documents\Assetto Corsa\logs\custom_shaders_patch.log) for every important step, so a test can be
--- read from that file afterwards instead of from the screen
-local function dlog(...)
-  if cfg.debug then ac.log('GridBox: ' .. string.format(...)) end
+local VERSION = 'v1.6'
+do -- always, once per load: which script version runs on which CSP build (the first thing to look for in a driver's log)
+  local ok, build = pcall(ac.getPatchVersionCode)
+  pcall(ac.log, string.format('GridBox %s loaded, CSP build %s', VERSION, ok and tostring(build) or '?'))
 end
 
-local function send(event, data)
-  if #outbox < 20 then outbox[#outbox + 1] = { event = event, data = data } end
+-- the random delays of the events only spread the clients out if every client draws different numbers (Lua starts with the same seed)
+pcall(function() math.randomseed(os.time() + (car.sessionID or 0) * 7919) math.random() math.random() end)
+
+-- DEBUG=1: a line in the CSP log (Documents\Assetto Corsa\logs\custom_shaders_patch.log, wiped whenever the game starts) for every
+-- important step, with the session clock in ms so that the logs of several drivers can be merged. A logging mistake (a nil in a
+-- format) must never reach the start logic, hence the pcall.
+local function dlog(...)
+  if not cfg.debug then return end
+  local ok, text = pcall(string.format, ...)
+  pcall(ac.log, string.format('GridBox: t=%.0f %s', sim.currentSessionTime, ok and text or ('log format error: ' .. tostring(text))))
+end
+
+-- the text of f(...) or '?' if it fails: for values that only go into a log line
+local function try(f, ...)
+  local ok, v = pcall(f, ...)
+  return ok and tostring(v) or '?'
+end
+
+local clock, dropped, refused = 0, 0, false -- seconds the script has run; events dropped; is the server refusing sends right now
+local delayed = {} -- events waiting for their random delay (so that 20 clients do not send at the same instant)
+
+-- jitter: seconds of random delay; optional: debug events, dropped first when the outbox fills up (reports must get through)
+local function send(event, data, jitter, optional)
+  delayed[#delayed + 1] = { event = event, data = data, due = clock + (jitter and math.random() * jitter or 0), optional = optional }
 end
 
 local function flush()
+  local k = 1
+  while k <= #delayed do
+    local item = delayed[k]
+    if item.due <= clock then
+      table.remove(delayed, k)
+      if #outbox >= (item.optional and 10 or 20) then
+        dropped = dropped + 1
+        dlog('event dropped, %d waiting in the outbox, %d dropped so far', #outbox, dropped)
+      else
+        outbox[#outbox + 1] = item
+      end
+    else
+      k = k + 1
+    end
+  end
   local item = outbox[1]
-  if item and item.event(item.data) then table.remove(outbox, 1) end
+  if not item then return end
+  if item.event(item.data) then
+    table.remove(outbox, 1)
+    refused = false
+  elseif not refused then
+    refused = true
+    dlog('send refused by the server (%d waiting)', #outbox)
+  end
 end
 
 -- Grid position among the cars that are connected: the game's race position also counts empty entry slots ahead of the car.
@@ -119,7 +166,7 @@ end
 -- tells the admins' clients where this car's box is
 local function shareBox()
   local g = grid
-  send(shareEvent, { pos = g.pos, x = g.line.x, y = g.y, z = g.line.z, fx = g.fwd.x, fz = g.fwd.z, length = g.length })
+  send(shareEvent, { pos = g.pos, x = g.line.x, y = g.y, z = g.line.z, fx = g.fwd.x, fz = g.fwd.z, length = g.length }, 2)
 end
 
 -- Where the car's axles are: front and rear axle centres, the car's heading, the wheelbase and the ground height under it (the
@@ -172,37 +219,54 @@ local function nearestStart(root)
   return best, bestD, count
 end
 
-local function slotNode()
+-- Returns the slot number, the node's position and facing, whether the number was assigned by the server, a note saying how it was
+-- found, and the forcedPosition the session reported. atSpawn: this is the automatic recording at the session start, where a car stands
+-- on its own slot.
+local function slotNode(atSpawn)
+  local root = ac.findNodes('sceneRoot:yes')
   local session = ac.getSession(sim.currentSessionIndex)
-  local index = session and session.forcedPosition
-  local assigned = true
-  if not index or index < 0 then
-    assigned = false
-    -- no slot assigned (measured: a pickup server leaves forcedPosition at -1): a standing car takes the start node it stands nearest to
-    local why = 'forcedPosition=' .. tostring(index)
-    if cfg.slotRadius <= 0 then slotWhy = why return end
-    if car.speedKmh >= cfg.still then slotWhy = why .. ', car moving' return end
-    if car.isInPitlane then slotWhy = why .. ', car in the pit lane' return end
-    local best, dist = nearestStart(ac.findNodes('sceneRoot:yes'))
-    if not best or dist > cfg.slotRadius then
-      slotWhy = string.format('%s, nearest start node %s m away', why, dist and string.format('%.1f', dist) or '-')
-      return
+  local forced = session and session.forcedPosition
+  local assigned = forced and forced >= 0
+  local why = 'forcedPosition=' .. tostring(forced)
+  -- the start node a standing car outside the pit lane stands nearest to (measured: a pickup server leaves forcedPosition at -1)
+  local near, nearD, nearWhy
+  if cfg.slotRadius <= 0 then nearWhy = 'SLOT_RADIUS_M=0'
+  elseif car.speedKmh >= cfg.still then nearWhy = 'car moving'
+  elseif car.isInPitlane then nearWhy = 'car in the pit lane'
+  else
+    near, nearD = nearestStart(root)
+    if not near or nearD > cfg.slotRadius then
+      nearWhy = string.format('nearest start node %s m away', nearD and string.format('%.1f', nearD) or '-')
+      near = nil
     end
-    index = best
+  end
+  local index, how
+  if assigned and near and near ~= forced and atSpawn then
+    -- at the session start the car stands on its own slot, so a different number means that forcedPosition does not mean what this
+    -- script assumes (never seen in the game): trust the node, and say so in the log
+    dlog('forcedPosition %d disagrees with the start node the car stands on, %d (%.2f m away): using the node', forced, near, nearD)
+    index, how, assigned = near, string.format('nearest node (forcedPosition %d disagrees)', forced), false
+  elseif assigned then
+    index, how = forced, 'assigned by the session'
+  elseif near then
+    index, how = near, 'nearest node'
+  else
+    slotWhy = why .. ', ' .. nearWhy
+    return
   end
   local name = string.format('AC_START_%d', index)
-  local node = ac.findNodes('sceneRoot:yes'):findNodes(name)
+  local node = root:findNodes(name)
   if node:name(1) ~= name then slotWhy = string.format('no node %s (%d found)', name, node:size()) return end
   local pos, look = node:getPosition(), node:getLook()
-  if pos and look then slotWhy = '-' return index, pos, look, assigned end
+  if pos and look then slotWhy = '-' return index, pos, look, assigned, how, forced end
   slotWhy = 'node without position'
 end
 
 -- The box from the track's start slot (the main way). The game spawns a car with its physics origin on the node, so the front line is
 -- the front axle's offset from that origin (measured on this car, wherever it is now) ahead of the node: it works for a car that
 -- spun, joined late or reconnected too. Returns nil if the slot cannot be determined.
-local function slotBox()
-  local ok, index, pos, look, assigned = pcall(slotNode)
+local function slotBox(atSpawn)
+  local ok, index, pos, look, assigned, how, forced = pcall(slotNode, atSpawn)
   if not ok then slotWhy = 'error: ' .. tostring(index) end
   if not ok or not index then return nil end
   local origin = physicsOrigin()
@@ -219,7 +283,7 @@ local function slotBox()
   local ahead = (cfg.lineFromNode > 0 and cfg.lineFromNode or frontOff + cfg.patch / 2) + cfg.lineOffset
   local g = newGrid(pos:clone():addScaled(fwd, ahead), pos:clone():addScaled(fwd, midOff), fwd,
     c.wheelbase + 1.8, pos.y, assigned and index + 1 or gridPosition()) -- an assigned slot names the position, a nearest node does not (empty entries count)
-  g.slot, g.ahead = index, ahead
+  g.slot, g.ahead, g.how, g.forced = index, ahead, how, forced
   -- how far the box centre from the slot is from where the car really is: about 0 for a car standing on its spawn spot (DEBUG status)
   if car.speedKmh < cfg.still then g.slotErr = math.sqrt((g.center.x - mid.x) ^ 2 + (g.center.z - mid.z) ^ 2) end
   return g
@@ -245,20 +309,41 @@ end
 
 -- Records this car's box: from the track's start slot, or where the car stands if the slot cannot be determined (forcedPosition -1,
 -- no such node, no node API). Returns true if a box was recorded.
+local mm = function(v) return math.max(-32000, math.min(32000, math.floor((v or 0) * 1000 + 0.5))) end
+
+-- DEBUG: sends this client's state to everybody; every client with DEBUG=1 logs what arrives (see debugEvent). what: 1 recorded,
+-- 2 not recorded, 3 start lights received, 4 jump start, 5 lights out, 6 status on request. Dropped first when the outbox is full.
+local function sendDebug(what)
+  if not cfg.debug then return end
+  pcall(function()
+    local g = grid
+    local flags = (g and 1 or 0) + (g and g.shown and 2 or 0) + (car.isInPitlane and 4 or 0) + (g and g.armed and 8 or 0)
+      + (g and g.jumped and 16 or 0) + (lightsOut and 32 or 0)
+    send(debugEvent, { what = what, pos = g and g.pos or 0, slot = g and g.slot or -1, flags = flags, errMm = mm(g and g.slotErr),
+      aheadMm = mm(g and g.ahead), overMm = mm(g and g.over), sideMm = mm(g and g.side), restOverMm = mm(g and g.restOver),
+      restSideMm = mm(g and g.restSide), speed = math.floor(car.speedKmh * 10), session = sim.raceSessionType,
+      toLights = lightsOut and (lightsOut - sim.currentSessionTime) or -1 }, 1.5, true)
+  end)
+end
+
 local function record(anySession)
   if not anySession and not recordsHere() then return false end -- grid boxes are for the sessions named in RECORD_IN (default: the race)
-  local g = cfg.source ~= 'CAR' and slotBox()
+  local g = cfg.source ~= 'CAR' and slotBox(not anySession)
   if g then
     grid = g
   elseif not carBox() then
-    dlog('no box recorded (session type %d, speed %.1f, pit lane %s): %s', sim.raceSessionType, car.speedKmh, tostring(car.isInPitlane), slotWhy)
+    dlog('no box recorded (session type %d, speed %.1f, pit lane %s, manual %s): %s', sim.raceSessionType, car.speedKmh,
+      tostring(car.isInPitlane), tostring(anySession == true), slotWhy)
+    sendDebug(2)
     return false
   end
   lightsOut = nil
   shareBox()
-  dlog('recorded P%d from=%s slotErr=%s line-offset=%+.2f m line-from-node=%s, front line at x=%.2f z=%.2f, facing x=%.3f z=%.3f', grid.pos,
-    grid.slot and ('slot ' .. grid.slot) or 'car', grid.slotErr and string.format('%.2f', grid.slotErr) or '-', cfg.lineOffset,
-    grid.ahead and string.format('%.2f m', grid.ahead) or '-', grid.line.x, grid.line.z, grid.fwd.x, grid.fwd.z)
+  dlog('recorded P%d from=%s (%s) forcedPosition=%s car=%s session type %d manual=%s slotErr=%s line-offset=%+.2f m line-from-node=%s, front line at x=%.2f z=%.2f, facing x=%.3f z=%.3f',
+    grid.pos, grid.slot and ('slot ' .. grid.slot) or 'car', tostring(grid.how or 'from where the car stands'), tostring(grid.forced),
+    try(ac.getCarID, 0), sim.raceSessionType, tostring(anySession == true), grid.slotErr and string.format('%.2f', grid.slotErr) or '-',
+    cfg.lineOffset, grid.ahead and string.format('%.2f m', grid.ahead) or '-', grid.line.x, grid.line.z, grid.fwd.x, grid.fwd.z)
+  sendDebug(1)
   return true
 end
 
@@ -301,17 +386,135 @@ local function stamp()
   return ok and text or string.format('%.0f s', sim.currentSessionTime / 1000)
 end
 
-local reportCount
+local counts = {}
 -- Appends a line to the admin's report file: ac.storage keeps string keys in an INI under Documents\Assetto Corsa\cfg\extension\
 -- state\lua\ (scripts have no other way to write files). Keys report_000 .. report_999 are reused in a ring, `reports` is the total.
-local function logLine(text)
-  if not reportCount then
+-- DEBUG lines go to their own ring (debug_000 .. debug_999, total `debugs`), so that the report count stays the number of reports.
+local function logLine(text, name)
+  name = name or 'report'
+  local total = name .. 's'
+  if not counts[name] then
     ac.storageSetPath('gridbox')
-    reportCount = tonumber(ac.storage.reports) or 0
+    counts[name] = tonumber(ac.storage[total]) or 0
   end
-  reportCount = reportCount + 1
-  ac.storage[string.format('report_%03d', reportCount % 1000)] = text
-  ac.storage.reports = tostring(reportCount)
+  counts[name] = counts[name] + 1
+  ac.storage[string.format('%s_%03d', name, counts[name] % 1000)] = text
+  ac.storage[total] = tostring(counts[name])
+end
+
+-- DEBUG recorder ---------------------------------------------------------------------------------------------------------
+-- What a test needs to be understood from the log of the admin's PC alone: who was in the session, which box each car had, how
+-- every car moved around the lights-out, and where every tyre was at the lights-out. Nothing here runs without DEBUG=1, and it
+-- is all wrapped in pcall so that it can not break the start logic.
+local function carName(i, c)
+  local ok, name = pcall(function() return c:driverName() end)
+  if not (ok and name) then ok, name = pcall(ac.getDriverName, i) end
+  return ok and tostring(name) or '?'
+end
+
+local function loadStartNodes()
+  if startNodes then return startNodes end
+  startNodes = {}
+  pcall(function()
+    local root = ac.findNodes('sceneRoot:yes')
+    for i = 0, root:findNodes('AC_START_?'):size() - 1 do
+      local node = root:findNodes('AC_START_' .. i)
+      startNodes[#startNodes + 1] = { name = 'AC_START_' .. i, pos = node:getPosition():clone(), look = node:getLook():clone() }
+    end
+  end)
+  return startNodes
+end
+
+-- every connected car: index, session ID, driver, model, race position
+local function logCars(label)
+  for i = 0, sim.carsCount - 1 do
+    local c = ac.getCar(i)
+    if c and c.isConnected then
+      dlog('%s: car [%d] sid=%s %s model=%s race position %s, pit lane %s', label, i, tostring(c.sessionID), carName(i, c),
+        try(ac.getCarID, i), tostring(c.racePosition), tostring(c.isInPitlane))
+    end
+  end
+end
+
+local nodesLogged = false
+local function logSessionInfo()
+  local s = ac.getSession(sim.currentSessionIndex)
+  dlog('session: index %d type %d forcedPosition %s, %d cars, track %s, own car %s; settings source=%s record_in=%s style=%s line-from-node=%.2f line-offset=%.2f slot-radius=%.1f',
+    sim.currentSessionIndex, sim.raceSessionType, tostring(s and s.forcedPosition), sim.carsCount, try(ac.getTrackID), try(ac.getCarID, 0),
+    cfg.source, cfg.recordIn, cfg.style, cfg.lineFromNode, cfg.lineOffset, cfg.slotRadius)
+  logCars('car list')
+  if not nodesLogged then
+    nodesLogged = true
+    for _, n in ipairs(loadStartNodes()) do
+      dlog('start node %s at x=%.3f y=%.3f z=%.3f facing x=%.3f z=%.3f', n.name, n.pos.x, n.pos.y, n.pos.z, n.look.x, n.look.z)
+    end
+  end
+end
+
+-- how many of the other connected cars have shared their box with this (admin) client
+local function logBoxesKnown()
+  local known, connected = 0, 0
+  for i = 1, sim.carsCount - 1 do
+    local c = ac.getCar(i)
+    if c and c.isConnected then
+      connected = connected + 1
+      if others[c.sessionID] then known = known + 1 end
+    end
+  end
+  dlog('boxes known: own box %s, %d of %d other connected cars shared theirs (admin %s)', grid and 'yes' or 'no', known, connected, tostring(sim.isAdmin))
+end
+
+-- every connected car at the lights-out: its tyres' positions (front left, front right, rear left, rear right) and its box, enough to
+-- work out later who was outside and who was moving, without trusting any driver's own report. Remote cars move at network rate.
+local function snapshotCars()
+  logBoxesKnown()
+  for i = 0, sim.carsCount - 1 do
+    local c = ac.getCar(i)
+    if c and c.isConnected then
+      local wheels = ''
+      pcall(function()
+        for k = 0, 3 do wheels = wheels .. string.format(' (%.2f,%.2f)', c.wheels[k].position.x, c.wheels[k].position.z) end
+      end)
+      local b = (i == 0) and grid or others[c.sessionID]
+      local box = b and string.format('box P%d line=(%.2f,%.2f) face=(%.3f,%.3f) len=%.2f', b.pos, b.line.x, b.line.z, b.fwd.x, b.fwd.z, b.length)
+        or 'box unknown'
+      dlog('lights-out snapshot: car [%d] sid=%s %s model=%s v=%.1f km/h ping=%s pit=%s origin=(%.2f,%.2f) look=(%.3f,%.3f) wheels%s %s', i,
+        tostring(c.sessionID), carName(i, c), try(ac.getCarID, i), c.speedKmh, tostring(c.ping), tostring(c.isInPitlane), c.position.x, c.position.z,
+        c.look.x, c.look.z, wheels, box)
+    end
+  end
+end
+
+-- The flight recorder: from the Start Lights message to 3 s after the lights go out (at most 30 s of waiting are recorded, an F1-style
+-- first message has a delay of hours), four times a second: every connected car's speed, plus the moment each car first moves.
+local function recorderStart()
+  local now = sim.currentSessionTime
+  rec = { lightsAt = lightsOut, untilT = math.min(lightsOut, now + 30000) + 3000, nextT = now, moved = {}, snap = false }
+end
+
+local function recorderTick()
+  if not rec then return end
+  local now = sim.currentSessionTime
+  if now > rec.untilT then rec = nil return end
+  if now >= rec.lightsAt and not rec.snap then
+    rec.snap = true
+    snapshotCars()
+  end
+  if now < rec.nextT then return end
+  rec.nextT = now + 250
+  local speeds = {}
+  for i = 0, sim.carsCount - 1 do
+    local c = ac.getCar(i)
+    if c and c.isConnected then
+      speeds[#speeds + 1] = string.format('%d:%.1f', i, c.speedKmh)
+      if not rec.moved[i] and c.speedKmh >= cfg.jump then
+        rec.moved[i] = true
+        dlog('car [%d] %s moved first at %+.0f ms from the lights-out (speed %.1f km/h)', i, carName(i, c), now - rec.lightsAt, c.speedKmh)
+      end
+    end
+  end
+  dlog('flight recorder %+.2f s from the lights-out; speeds km/h by car index %s; own box over=%.3f side=%.3f', (now - rec.lightsAt) / 1000,
+    table.concat(speeds, ' '), grid and grid.over or 0, grid and grid.side or 0)
 end
 
 -- With the lines hidden (STYLE=TEXT) the drivers go by the track's own painted boxes, so nothing is checked, shown or reported.
@@ -319,14 +522,22 @@ local function checking() return cfg.style ~= 'TEXT' end
 local function outside() return checking() and (grid.over > cfg.tolerance or grid.side > cfg.tolerance) end
 
 local function tick(dt)
+  clock = clock + dt
   flush()
   if settle > 0 then
     settle = settle - dt
-    if settle <= 0 and not record(false) and car.speedKmh >= cfg.still and retries < 6 then
-      -- the car was still moving (for example creeping): try again every 0.5 s for a few seconds instead of giving up for the session
-      retries, settle = retries + 1, 0.5
+    if settle <= 0 then
+      if sessionInfoDue then -- the session start callback still sees the previous session, so the session is logged now
+        sessionInfoDue = false
+        if cfg.debug then pcall(logSessionInfo) end
+      end
+      if not record(false) and car.speedKmh >= cfg.still and retries < 6 then
+        -- the car was still moving (for example creeping): try again every 0.5 s for a few seconds instead of giving up for the session
+        retries, settle = retries + 1, 0.5
+      end
     end
   end
+  if cfg.debug then pcall(recorderTick) end
   if not grid then return end
   grid.over, grid.side = measure()
   local still = car.speedKmh < cfg.still
@@ -344,6 +555,7 @@ local function tick(dt)
     elseif grid.armed and car.speedKmh >= cfg.jump then
       grid.jumped = true
       report(2, lightsOut - sim.currentSessionTime)
+      sendDebug(4)
     end
   end
 
@@ -355,6 +567,7 @@ local function tick(dt)
       if cfg.finalReport and checking() and (grid.restOver > cfg.tolerance or grid.restSide > cfg.tolerance) then report(0) end
       grid.shown = false
     end
+    sendDebug(5)
   end
 end
 
@@ -380,6 +593,10 @@ end
 function script.update(dt)
   local ok, err = pcall(tick, dt)
   if not ok then lastError = tostring(err) end
+  if lastError ~= lastLoggedError then -- always, not only with DEBUG: a script that fails silently is the worst case
+    lastLoggedError = lastError
+    pcall(ac.log, string.format('GridBox: t=%.0f error: %s', sim.currentSessionTime, tostring(lastError)))
+  end
   ac.debug('gridbox error', lastError)
   if cfg.debug then ac.debug('gridbox status', status()) ac.debug('gridbox slot', slotStatus()) end
 end
@@ -397,17 +614,7 @@ end
 -- painted boxes of the track. Read once per session.
 local COL_NODE = rgbm(1, 0.8, 0, 1)
 local function drawStartNodes()
-  if not startNodes then
-    startNodes = {}
-    pcall(function()
-      local root = ac.findNodes('sceneRoot:yes')
-      for i = 0, root:findNodes('AC_START_?'):size() - 1 do
-        local node = root:findNodes('AC_START_' .. i)
-        startNodes[#startNodes + 1] = { name = 'AC_START_' .. i, pos = node:getPosition():clone(), look = node:getLook():clone() }
-      end
-    end)
-  end
-  for _, n in ipairs(startNodes) do
+  for _, n in ipairs(loadStartNodes()) do
     if math.abs(n.pos.x - car.position.x) < 40 and math.abs(n.pos.z - car.position.z) < 40 then
       local at = vec3(n.pos.x, n.pos.y + 0.05, n.pos.z)
       render.debugCross(at, 0.4, COL_NODE)
@@ -470,7 +677,7 @@ end
 
 -- events, session hooks, admin buttons ---------------------------------------------------------------------------
 -- admin commands, sent to every client: 1 record the boxes again, 2 show the remembered boxes again, 3 hide them,
--- 4 switch between lines + text and text only, 5 send your box to the admins again
+-- 4 switch between lines + text and text only, 5 send your box to the admins again, 6 (DEBUG) send your status to everybody's log
 local commandEvent = ac.OnlineEvent({
   key = ac.StructItem.key('GridBoxRecord'),
   cmd = ac.StructItem.int16(),
@@ -480,6 +687,8 @@ local commandEvent = ac.OnlineEvent({
     record(true)
   elseif message.cmd == 4 then
     cfg.style = cfg.style == 'TEXT' and 'BOX' or 'TEXT'
+  elseif message.cmd == 6 then
+    sendDebug(6)
   elseif grid and message.cmd == 2 then
     grid.shown, lightsOut = true, nil
   elseif grid and message.cmd == 3 then
@@ -497,8 +706,17 @@ ac.OnlineEvent({
   delayTime = ac.StructItem.float(),
 }, function(sender, message)
   lightsOut = message.startTime + message.delayTime
-  dlog('start lights event: lights out in %.0f ms', lightsOut - sim.currentSessionTime)
+  dlog('start lights event from car %s: startTime=%.0f delayTime=%.0f, lights out in %.0f ms', tostring(sender and sender.index),
+    message.startTime, message.delayTime, lightsOut - sim.currentSessionTime)
   if grid then grid.armed, grid.jumped = false, false end
+  if cfg.debug then
+    pcall(function()
+      recorderStart()
+      logCars('at start lights')
+      logBoxesKnown()
+    end)
+    sendDebug(3)
+  end
 end, ac.SharedNamespace.ServerScript)
 
 -- The reports: only the clients of signed-in admins write them down (to the file via ac.storage); everybody else ignores them.
@@ -510,6 +728,9 @@ reportEvent = ac.OnlineEvent({
   side = ac.StructItem.int16(),
   ms = ac.StructItem.int16(),
 }, function(sender, m)
+  dlog('report received from car %s sid %s %s: P%d kind %d over=%d side=%d ms=%d mm (%s)', tostring(sender and sender.index),
+    tostring(sender and sender.sessionID), sender and carName(sender.index, sender) or '?', m.pos, m.kind, m.over, m.side, m.ms,
+    (sim.isAdmin and sender) and 'written to the report file' or 'ignored: not an admin')
   if not sim.isAdmin or not sender then return end
   local what
   if m.kind == 2 then
@@ -535,23 +756,56 @@ shareEvent = ac.OnlineEvent({
   fx = ac.StructItem.float(), fz = ac.StructItem.float(),
   length = ac.StructItem.float(),
 }, function(sender, m)
+  dlog('box shared by car %s sid %s %s: P%d line=(%.2f,%.2f) facing=(%.3f,%.3f) length=%.2f (%s)', tostring(sender and sender.index),
+    tostring(sender and sender.sessionID), sender and carName(sender.index, sender) or '?', m.pos, m.x, m.z, m.fx, m.fz, m.length,
+    (sim.isAdmin and sender and sender.index ~= 0) and 'kept' or 'ignored: not an admin, or the own box')
   if not sim.isAdmin or not sender or sender.index == 0 then return end
   local fwd, line = vec3(m.fx, 0, m.fz), vec3(m.x, m.y, m.z)
   local box = buildBox(line, fwd, m.length, m.y)
   others[sender.sessionID] = { bars = box.bars, y = box.y, line = line, mid = line:clone():addScaled(fwd, -m.length / 2),
-    pos = m.pos, name = sender:driverName() }
+    pos = m.pos, name = sender:driverName(), fwd = fwd, length = m.length }
+end, ac.SharedNamespace.ServerScript)
+
+-- DEBUG: the status snapshots of every client (sent by sendDebug), logged by every client with DEBUG=1 and kept by admins in the
+-- report file too, so a start can be reconstructed from the admin's PC even when the drivers' own logs are not at hand.
+local WHAT = { 'recorded', 'not recorded', 'start lights received', 'jump start', 'lights out', 'status on request' }
+debugEvent = ac.OnlineEvent({
+  key = ac.StructItem.key('GridBoxDebug'),
+  what = ac.StructItem.int16(), pos = ac.StructItem.int16(), slot = ac.StructItem.int16(), flags = ac.StructItem.int16(),
+  errMm = ac.StructItem.int16(), aheadMm = ac.StructItem.int16(), overMm = ac.StructItem.int16(), sideMm = ac.StructItem.int16(),
+  restOverMm = ac.StructItem.int16(), restSideMm = ac.StructItem.int16(), speed = ac.StructItem.int16(), session = ac.StructItem.int16(),
+  toLights = ac.StructItem.float(),
+}, function(sender, m)
+  if not cfg.debug then return end
+  pcall(function()
+    local text = string.format('driver %s (car %s, sid %s, %s) %s: P%d slot %d box=%s shown=%s pit=%s armed=%s jumped=%s lights-out-pending=%s slotErr=%d mm line-from-node=%d mm over=%d side=%d mm, at rest over=%d side=%d mm, speed %.1f km/h, session type %d, %.0f ms to lights out',
+      sender and carName(sender.index, sender) or '?', tostring(sender and sender.index), tostring(sender and sender.sessionID),
+      sender and try(ac.getCarID, sender.index) or '?', WHAT[m.what] or tostring(m.what), m.pos, m.slot, tostring(m.flags % 2 == 1),
+      tostring(math.floor(m.flags / 2) % 2 == 1), tostring(math.floor(m.flags / 4) % 2 == 1), tostring(math.floor(m.flags / 8) % 2 == 1),
+      tostring(math.floor(m.flags / 16) % 2 == 1), tostring(math.floor(m.flags / 32) % 2 == 1), m.errMm, m.aheadMm, m.overMm, m.sideMm,
+      m.restOverMm, m.restSideMm, m.speed / 10, m.session, m.toLights)
+    dlog('%s', text)
+    if sim.isAdmin then logLine(string.format('%s  t=%.0f  %s', stamp(), sim.currentSessionTime, text), 'debug') end
+  end)
 end, ac.SharedNamespace.ServerScript)
 
 ac.onSessionStart(function()
-  grid, others, startNodes = nil, {}, nil
-  settle, retries = cfg.settle, 0
-  dlog('session start: index %d, type %d, forcedPosition %s', sim.currentSessionIndex, sim.raceSessionType,
-    tostring((ac.getSession(sim.currentSessionIndex) or {}).forcedPosition))
+  grid, others, startNodes, rec = nil, {}, nil, nil
+  settle, retries, sessionInfoDue = cfg.settle, 0, true
+  dlog('session start callback (it still shows the previous session): index %d, type %d, forcedPosition %s', sim.currentSessionIndex,
+    sim.raceSessionType, tostring((ac.getSession(sim.currentSessionIndex) or {}).forcedPosition))
 end)
 
 ac.onOnlineWelcome(function(message, config)
   cfg.source = config:get('GRIDBOX', 'SOURCE', cfg.source):upper()
-  cfg.recordIn = config:get('GRIDBOX', 'RECORD_IN', cfg.recordIn):upper()
+  -- RECORD_IN=PRACTICE,RACE is a list for CSP: get() returns the first item only, the others come with the offset argument (measured
+  -- in the game: v1.5 read just "PRACTICE" from this line)
+  local sessions = {}
+  for i = 1, 5 do
+    local item = config:get('GRIDBOX', 'RECORD_IN', '', i)
+    if item ~= '' then sessions[#sessions + 1] = item end
+  end
+  if #sessions > 0 then cfg.recordIn = table.concat(sessions, ','):upper() end
   cfg.slotRadius = config:get('GRIDBOX', 'SLOT_RADIUS_M', cfg.slotRadius)
   cfg.style = config:get('GRIDBOX', 'STYLE', cfg.style):upper()
   cfg.settle = config:get('GRIDBOX', 'SETTLE_SECONDS', cfg.settle)
@@ -567,6 +821,11 @@ ac.onOnlineWelcome(function(message, config)
   cfg.jumpReport = config:get('GRIDBOX', 'JUMP_REPORT', 1) == 1
   cfg.jump = config:get('GRIDBOX', 'JUMP_KMH', cfg.jump)
   cfg.debug = config:get('GRIDBOX', 'DEBUG', 0) == 1
+  -- always: proves that this client received the server's settings (without this line in a driver's log the welcome message did
+  -- not arrive, for example because of the CSP new-menu bug) and which ones
+  pcall(ac.log, string.format('GridBox %s: welcome received, DEBUG=%s source=%s record_in=%s style=%s line-from-node=%.2f line-offset=%.2f slot-radius=%.1f final-report=%s jump-report=%s',
+    VERSION, tostring(cfg.debug), cfg.source, cfg.recordIn, cfg.style, cfg.lineFromNode, cfg.lineOffset, cfg.slotRadius,
+    tostring(cfg.finalReport), tostring(cfg.jumpReport)))
   if cfg.debug then ac.setMessage('GridBox', 'script loaded') end
   if not grid then settle, retries = cfg.settle, 0 end
   local function admin(title, action)
@@ -591,6 +850,7 @@ ac.onOnlineWelcome(function(message, config)
     admin('Grid debug: front line 5 cm forward', function() nudge(0.05) end)
     admin('Grid debug: front line 5 cm back', function() nudge(-0.05) end)
     -- test aid when a test driver cannot drive to the grid: put the own car on its start slot (the game's START spawn set)
+    admin('Grid debug: ask everyone for a status', function() commandEvent({ cmd = 6 }) end)
     admin('Grid debug: teleport my car to the start grid', function()
       physics.teleportCarTo(0, ac.SpawnSet.Start)
       dlog('teleported the own car to the start grid')

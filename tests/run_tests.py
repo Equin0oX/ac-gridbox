@@ -26,7 +26,7 @@ function vec2(x, y) return {x = x or 0, y = y or 0} end
 function rgbm(r, g, b, m) return {r = r, g = g, b = b, mult = m} end
 
 SIM = {raceSessionType = 3, currentSessionTime = 0, windowWidth = 1920, currentSessionIndex = 1, carsCount = 1, isAdmin = true}
-CAR = {speedKmh = 0, position = vec3(0, 0, 0), racePosition = 3, wheels = {}, isInPitlane = false}
+CAR = {speedKmh = 0, position = vec3(0, 0, 0), racePosition = 3, wheels = {}, isInPitlane = false, isConnected = true, look = vec3(1, 0, 0), ping = 5, sessionID = 0}
 OTHERS = {}
 function CAR:driverName() return 'Test Driver' end
 -- car centre (cx, cz) heading +x, wheelbase 2.7 m, wheel centres 0.3 m above ground
@@ -54,6 +54,11 @@ ac = {SpawnSet = {Start = 'START', Pits = 'PIT'}, SessionType = {Race = 3, Pract
 function ac.getSim() return SIM end
 function ac.getCar(i) if i == 0 then return CAR end return OTHERS[i] end
 function ac.getUI() return {uiScale = 1} end
+math.random = function() return 0 end -- no random delays unless a test asks for them
+function ac.getCarID(i) if i == 0 then return 'tatuus_ft_60K' end return 'other_car' end
+function ac.getTrackID() return 'rt_autodrom_most' end
+function ac.getPatchVersionCode() return 3465 end
+function ac.getDriverName(i) return 'Driver ' .. i end
 function ac.sendChatMessage(t) CHAT[#CHAT + 1] = t end
 -- ac.storage: a callable table whose string keys land in a file; STORE is that file
 STORE = {}
@@ -129,8 +134,10 @@ def make(config=None):
     lua.execute(STUBS)
     lua.execute(open(APP, encoding="utf-8").read())
     lua.execute("CFG = {}")
-    for k, v in (config or {}).items(): lua.execute("CFG['%s'] = %s" % (k, repr(v) if isinstance(v, str) else v))
-    lua.execute("WELCOME_CB('welcome', {get = function(self, s, k, d) if CFG[k] ~= nil then return CFG[k] end return d end})")
+    for k, v in (config or {}).items():
+        if isinstance(v, list): lua.execute("CFG['%s'] = {%s}" % (k, ", ".join(repr(x) for x in v)))
+        else: lua.execute("CFG['%s'] = %s" % (k, repr(v) if isinstance(v, str) else v))
+    lua.execute("WELCOME_CB('welcome', {get = function(self, s, k, d, offset) local v = CFG[k] if type(v) == 'table' then v = v[offset or 1] end if v ~= nil then return v end return d end})")
     return lua
 
 def start_race(lua):
@@ -330,26 +337,26 @@ check("box=yes from=slot 0 slotErr=0.00 shown=true over=-0.040 side=" in n(lua, 
       "DEBUG=1: status line shows the box state, the over/side margins in metres and the lights countdown")
 
 # 18 slot mode (the main way): the box comes from the track's start slot of this car (forcedPosition), not from where the car stands
-lua = make(); lua.execute("SLOT = 1"); start_race(lua); lua.execute("frame()")
+lua = make(); lua.execute("SLOT = 1; place(94, 53)"); start_race(lua); lua.execute("frame()")
 check(n(lua, "LABELS[1]") == "P2  YOUR BOX", "forcedPosition 1 is slot AC_START_1 and grid P2")
 check(abs(max(xs(2)) - 95.44) < 1e-6 and abs(max(zs(1)) - 54.24) < 1e-6 and abs(min(zs(1)) - 51.76) < 1e-6,
-      "the box stands at the start node (94, 53) with the front axle offset ahead of it, not where the car stands (100, 50)")
+      "the box stands at the start node (94, 53) with the front axle offset ahead of it")
 lua = make({"DEBUG": 1}); lua.execute("SLOT = 0"); start_race(lua); lua.execute("frame()")
 check("from=slot 0 slotErr=0.00" in n(lua, "HUD[1][1]"), "DEBUG: a car standing on its spawn spot is 0.00 m from where the slot says (the assumption holds)")
-lua = make({"DEBUG": 1}); lua.execute("SLOT = 1"); start_race(lua); lua.execute("frame()")
-check("from=slot 1 slotErr=6.71" in n(lua, "HUD[1][1]"), "DEBUG: a car 6.71 m from its slot shows that distance")
+lua = make({"DEBUG": 1}); lua.execute("SLOT = 1; place(110, 50)"); start_race(lua); lua.execute("frame()")
+check("from=slot 1 slotErr=16.28" in n(lua, "HUD[1][1]"), "DEBUG: a car 16.28 m from its assigned slot (and not near another node) shows that distance")
 lua = make(); lua.execute("SLOT = 0; CAR.speedKmh = 60; SESSION_CB(1, false); run(2); frame()")
 check(n(lua, "#QUADS") == 3, "a moving car still gets its slot box: the slot does not need a standing car")
-lua = make(); lua.execute("SLOT = 1"); start_race(lua); lua.execute("place(100.5, 50); run(1); lights(100, 100); run(1)")
+lua = make(); lua.execute("SLOT = 1; place(94, 53)"); start_race(lua); lua.execute("place(100.5, 50); run(1); lights(100, 100); run(1)")
 check(n(lua, "nreports()") == 1 and "over the line" in n(lua, "lastreport()"), "the check measures against the slot box: a car out of its slot at lights out is outside")
 
 # 18b fallback: the box from where the car stands, when the slot cannot be determined
 lua = make(); lua.execute("SLOT = -1"); start_race(lua); lua.execute("frame()")
 check(abs(max(xs(2)) - 101.44) < 1e-6 and n(lua, "LABELS[1]") == "P1  YOUR BOX", "forcedPosition -1: the box stands where the car stands")
-lua = make(); lua.execute("SLOT = 7"); start_race(lua); lua.execute("frame()")
-check(abs(max(xs(2)) - 101.44) < 1e-6, "a forcedPosition without a start node: the box stands where the car stands")
+lua = make(); lua.execute("SLOT = 7; place(200, 200)"); start_race(lua); lua.execute("frame()")
+check(abs(max(xs(2)) - 201.44) < 1e-6, "a forcedPosition without a start node (car away from the nodes): the box stands where the car stands")
 for slot, setup, why in ((-1, "place(200, 200)", "why-not-slot=forcedPosition=-1, nearest start node 180.3 m away"),
-                         (7, "", "why-not-slot=no node AC_START_7 (0 found)"),
+                         (7, "place(200, 200)", "why-not-slot=no node AC_START_7 (0 found)"),
                          (0, "ac.findNodes = nil", "why-not-slot=error:")):
     lua = make({"DEBUG": 1}); lua.execute("SLOT = %d; %s" % (slot, setup)); start_race(lua); lua.execute("frame()")
     check(why in n(lua, "HUD[2][1]"), "DEBUG second line says why the slot was not used: " + why)
@@ -430,11 +437,14 @@ check(n(lua, "#QUADS") == 0 and "P2  Other Driver" in list(lua.eval("LABELS").va
 # 23 debugging aids (DEBUG=1 only): log lines in the CSP log, start node markers, nudge buttons for the line offset
 logtext = lambda lua: chr(10).join(lua.eval("LOG").values())
 lua = make(); start_race(lua); lua.execute("lights(2000, 1500); run(4); frame()")
-check(n(lua, "#LOG") == 0 and n(lua, "#CROSSES") == 0 and n(lua, "#BUTTONS") == 5, "DEBUG off: nothing logged, no node markers, no nudge buttons")
+check(not [l for l in lua.eval("LOG").values() if l.startswith("GridBox: ")] and n(lua, "#CROSSES") == 0 and n(lua, "#BUTTONS") == 5,
+      "DEBUG off: no debug lines logged, no node markers, no nudge buttons")
 lua = make({"DEBUG": 1}); start_race(lua); lua.execute("lights(2000, 1500); run(4); frame()")
 log = logtext(lua)
-check("recorded P1 from=slot 0 slotErr=0.00 line-offset=+0.00 m" in log and "start lights event: lights out in 3500 ms" in log
-      and "lights out: box shown=true" in log and "session start: index 1, type 3, forcedPosition -1" in log, "DEBUG: session start, recording, start lights and lights out are logged")
+check("recorded P1 from=slot 0 (nearest node)" in log and "slotErr=0.00 line-offset=+0.00 m" in log
+      and "start lights event from car 0: startTime=4000 delayTime=1500, lights out in 3500 ms" in log
+      and "lights out: box shown=true" in log and "session start callback (it still shows the previous session): index 1, type 3, forcedPosition -1" in log,
+      "DEBUG: session start, recording, start lights and lights out are logged")
 lua.execute("frame()")
 check(n(lua, "#CROSSES") == 2 and "AC_START_0" in list(lua.eval("LABELS").values()), "DEBUG: the start nodes near the car are marked with a cross, an arrow and their name")
 lua = make({"DEBUG": 1}); lua.execute("place(300, 300)"); start_race(lua); lua.execute("frame()")
@@ -486,6 +496,107 @@ check(n(lua, "#TELEPORTS") == 0 and n(lua, "#BUTTONS") == 5, "DEBUG off: no tele
 lua = make({"DEBUG": 1}); start_race(lua); lua.execute("button('Grid debug: teleport my car to the start grid')")
 check(n(lua, "#TELEPORTS") == 1 and n(lua, "TELEPORTS[1][1]") == 0 and n(lua, "TELEPORTS[1][2]") == "START"
       and "teleported the own car to the start grid" in logtext(lua), "DEBUG: the teleport button puts car 0 on the START spawn set and logs it")
+
+# 27 logging of v1.6: always the load line, the welcome line and errors; with DEBUG everything a test needs
+OTHER_CAR = ("OTHERS = {[1] = {isConnected = true, racePosition = 5, speedKmh = 0, sessionID = 4, position = vec3(110, 0, 60), look = vec3(1, 0, 0), ping = 30, "
+             "isInPitlane = false, driverName = function() return 'Other Driver' end, wheels = {[0] = {position = vec3(111.35, 0, 59.2)}, "
+             "[1] = {position = vec3(111.35, 0, 60.8)}, [2] = {position = vec3(108.65, 0, 59.2)}, [3] = {position = vec3(108.65, 0, 60.8)}}}}; SIM.carsCount = 2")
+sent = lambda lua: [(lua.eval("SENT[%d].key" % i), lua.eval("SENT[%d].msg.what or 0" % i)) for i in range(1, lua.eval("#SENT") + 1)]
+nlog = lambda lua, text: logtext(lua).count(text)
+lua = make()
+check("GridBox v1.6 loaded, CSP build 3465" in logtext(lua) and "GridBox v1.6: welcome received, DEBUG=false source=AUTO record_in=RACE" in logtext(lua),
+      "always: the version and CSP build at load and the settings that arrived with the welcome message are logged")
+lua = make(); start_race(lua); lua.execute("CAR.wheels = nil; run(1)")
+check(len([l for l in lua.eval("LOG").values() if "error:" in l]) == 1, "an error of the script is logged once, not every frame, with or without DEBUG")
+
+lua = make({"DEBUG": 1}); lua.execute(OTHER_CAR); start_race(lua)
+check("session: index 1 type 3 forcedPosition -1, 2 cars, track rt_autodrom_most, own car tatuus_ft_60K" in logtext(lua)
+      and "car list: car [1] sid=4 Other Driver model=other_car" in logtext(lua) and "start node AC_START_0 at x=100.000 y=0.000 z=50.000" in logtext(lua),
+      "DEBUG: the session settings, the car list and the start nodes are logged once the session is known")
+lua.execute("SESSION_CB(2, false); run(2)")
+check(nlog(lua, "start node AC_START_0 at") == 1 and nlog(lua, "session: index") == 2, "...the start nodes only once, the session every time")
+check("recorded P1 from=slot 0 (nearest node) forcedPosition=-1 car=tatuus_ft_60K session type 3 manual=false" in logtext(lua),
+      "DEBUG: the recording says how the slot was found, forcedPosition, the car model, the session type and whether it was manual")
+
+# the assigned slot against the node the car stands on
+lua = make({"DEBUG": 1}); lua.execute("SLOT = 1"); start_race(lua); lua.execute("frame()")
+check("forcedPosition 1 disagrees with the start node the car stands on, 0" in logtext(lua) and abs(max(xs(2)) - 101.44) < 1e-6
+      and "P1  YOUR BOX" in list(lua.eval("LABELS").values()), "assigned slot 1 but the car stands on node 0 at the session start: the node wins, and it is logged")
+lua.execute("button('Grid: re-record boxes'); frame()")
+check(abs(max(xs(2)) - 95.44) < 1e-6 and "manual=true" in logtext(lua), "a manual re-record trusts the assigned slot")
+
+# logging must not break the logic
+lua = make({"DEBUG": 1}); lua.execute("ac.getCarID = function() error('boom') end"); start_race(lua); lua.execute("frame()")
+check(n(lua, "#QUADS") == 3 and "recorded P1" in logtext(lua) and "car=?" in logtext(lua), "a failing value in a log line does not stop the recording")
+lua = make({"DEBUG": 1}); start_race(lua); lua.execute("EVENTS['GridBoxShare'](OTHER, {x = 110.0, y = 0.0, z = 60.0, fx = 1.0, fz = 0.0, length = 4.5})")
+check("log format error" in logtext(lua), "a log line with a missing number says so instead of throwing")
+
+# random delay of the box share
+lua = make(); lua.execute("math.random = function() return 1 end; SENT = {}"); start_race(lua)
+check(n(lua, "#SENT") == 0, "the box share waits for its random delay of up to 2 s")
+lua.execute("run(2.2)")
+check(("GridBoxShare", 0) in sent(lua), "...and goes out after it")
+
+# the status events of every client
+lua = make({"DEBUG": 1}); lua.execute("SENT = {}"); start_race(lua)
+check(("GridBoxDebug", 1) in sent(lua), "DEBUG: a recording sends a status snapshot (what=1) to everybody")
+lua = make({"DEBUG": 1}); lua.execute("CAR.isInPitlane = true; SLOT = -1; SENT = {}"); start_race(lua)
+check(("GridBoxDebug", 2) in sent(lua) and "no box recorded" in logtext(lua), "DEBUG: a failed recording sends a snapshot too (what=2)")
+lua = make({"DEBUG": 1}); start_race(lua); lua.execute("SENT = {}; button('Grid debug: ask everyone for a status'); run(0.3)")
+check(("GridBoxDebug", 6) in sent(lua), "DEBUG: the status button makes every client send a snapshot (what=6)")
+lua = make(); start_race(lua); lua.execute("SENT = {}; button('Grid: re-record boxes'); run(0.3)")
+check(not [k for k, w in sent(lua) if k == "GridBoxDebug"], "without DEBUG no status snapshot is sent")
+snap = ("EVENTS['GridBoxDebug'](OTHER, {what = 1, pos = 2, slot = 1, flags = 3, errMm = 12, aheadMm = 2400, overMm = -40, sideMm = -300, "
+        "restOverMm = -40, restSideMm = -300, speed = 0, session = 3, toLights = -1})")
+lua = make({"DEBUG": 1}); lua.execute(OTHER_CAR); start_race(lua); lua.execute(snap)
+check("driver Other Driver (car 1, sid 4, other_car) recorded: P2 slot 1 box=true shown=true" in logtext(lua) and "slotErr=12 mm line-from-node=2400 mm" in logtext(lua),
+      "DEBUG: the snapshot of another client is logged with its driver, car model and numbers")
+lua = make({"DEBUG": 1}); lua.execute(OTHER_CAR); start_race(lua); lua.execute(snap)
+check("Other Driver" in str(lua.eval("STORE['debug_' .. string.format('%03d', tonumber(STORE.debugs) % 1000)]")) and n(lua, "nreports()") == 0,
+      "an admin also keeps it in the report file, in its own ring (it is not counted as a report)")
+lua = make(); lua.execute(OTHER_CAR); start_race(lua); lua.execute(snap)
+check("driver Other Driver" not in logtext(lua), "without DEBUG a snapshot is ignored")
+
+# the observer lines, also on a client that is not an admin
+lua = make({"DEBUG": 1}); lua.execute("SIM.isAdmin = false"); start_race(lua); lua.execute(share + "; EVENTS['GridBoxReport'](OTHER, {pos = 2, kind = 0, over = 120, side = 0, ms = 0})")
+check("box shared by car 1 sid 4 " in logtext(lua) and "P2 line=(110.00,60.00)" in logtext(lua) and "ignored: not an admin" in logtext(lua)
+      and "report received from car 1 sid 4 " in logtext(lua) and "P2 kind 0 over=120 side=0 ms=0 mm (ignored: not an admin)" in logtext(lua),
+      "DEBUG: shares and reports are logged before the admin check, with sender, numbers and what happened to them")
+
+# the flight recorder around the lights-out
+lua = make({"DEBUG": 1}); lua.execute(OTHER_CAR); start_race(lua); lua.execute("lights(2000, 1500); run(1)")
+check("start lights event from car 0: startTime=4000 delayTime=1500, lights out in 3500 ms" in logtext(lua) and "at start lights: car [1] sid=4 Other Driver" in logtext(lua)
+      and "boxes known: own box yes, 0 of 1 other connected cars shared theirs (admin true)" in logtext(lua), "DEBUG: the Start Lights message, the car list and how many boxes are known are logged")
+check(nlog(lua, "flight recorder") >= 4, "DEBUG: the flight recorder logs four times a second from the Start Lights message on")
+lua.execute("OTHERS[1].speedKmh = 25; run(2.6)")
+log = logtext(lua)
+check(nlog(lua, "car [1] Other Driver moved first at") == 1 and "moved first at -" in log, "DEBUG: the first movement of each car is logged once, in ms from the lights-out")
+check(nlog(lua, "lights-out snapshot: car [0]") == 1 and nlog(lua, "lights-out snapshot: car [1]") == 1
+      and "box P1 line=(101.40,50.00) face=(1.000,0.000) len=" in log and "wheels (111.35,59.20) (111.35,60.80) (108.65,59.20) (108.65,60.80) box unknown" in log,
+      "DEBUG: at the lights-out every car is logged once with its tyre positions and its box (own box, or unknown)")
+lua.execute("run(5)")
+count = nlog(lua, "flight recorder")
+lua.execute("run(5)")
+check(nlog(lua, "flight recorder") == count, "DEBUG: the flight recorder stops 3 s after the lights-out")
+lua = make({"DEBUG": 1}); start_race(lua); before = lua.eval("#LOG"); lua.execute("run(10)")
+check(lua.eval("#LOG") == before, "DEBUG: an idle box logs nothing per frame")
+
+# an outbox full of debug snapshots must not keep a report back
+lua = make({"DEBUG": 1}); start_race(lua)
+lua.execute("SEND_OK = false; SENT = {}; for i = 1, 14 do EVENTS['GridBoxRecord'](SENDER, {cmd = 6}) end; run(0.5)")
+check("event dropped, 10 waiting in the outbox" in logtext(lua) and nlog(lua, "send refused by the server") == 1, "DEBUG: snapshots are dropped when 10 wait, and a refusal is logged once")
+lua.execute("place(100.30, 50); run(1); lights(100, 100); run(1); SEND_OK = true; run(3)")
+check(("GridBoxReport", 0) in sent(lua), "...and the report still goes out when the server accepts events again")
+
+# 28 RECORD_IN=PRACTICE,RACE is a list for CSP (get() returns the first item, the rest comes with the offset): all items count
+lua = make({"RECORD_IN": ["PRACTICE", "RACE"]}); lua.execute(practice)
+check(n(lua, "#QUADS") == 3, "RECORD_IN=PRACTICE,RACE (a list): the practice session records")
+lua = make({"RECORD_IN": ["PRACTICE", "RACE"]}); start_race(lua); lua.execute("frame()")
+check(n(lua, "#QUADS") == 3, "RECORD_IN=PRACTICE,RACE (a list): the race records too (v1.5 read only the first item)")
+lua = make({"RECORD_IN": ["Practice", " Qualify"]}); start_race(lua); lua.execute("frame()")
+check(n(lua, "#QUADS") == 0, "RECORD_IN=Practice, Qualify: the race does not record")
+lua = make({"DEBUG": 1, "RECORD_IN": ["PRACTICE", "RACE"]})
+check("record_in=PRACTICE,RACE" in logtext(lua), "the welcome line shows the whole list")
 
 print("\n%d failed" % len(fails) if fails else "\nall passed")
 raise SystemExit(1 if fails else 0)
