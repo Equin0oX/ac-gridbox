@@ -49,7 +49,9 @@ place(100, 50)
 
 CHAT, HUD, QUADS, LABELS, DEBUG, BUTTONS, MSG, HUDOFF, EVENTS, QV = {}, {}, {}, {}, {}, {}, {}, {}, {}, {}
 TELEPORTS = {}
-physics = {teleportCarTo = function(i, set) TELEPORTS[#TELEPORTS + 1] = {i, set} end}
+POSITIONS = {}
+physics = {teleportCarTo = function(i, set) TELEPORTS[#TELEPORTS + 1] = {i, set} end,
+           setCarPosition = function(i, pos, dir) POSITIONS[#POSITIONS + 1] = {i, pos.x, pos.z, dir.x} end}
 ac = {SpawnSet = {Start = 'START', Pits = 'PIT'}, SessionType = {Race = 3, Practice = 1, Qualify = 2}, SharedNamespace = {ServerScript = 'server_script'}, StructItem = {}}
 function ac.getSim() return SIM end
 function ac.getCar(i) if i == 0 then return CAR end return OTHERS[i] end
@@ -78,7 +80,8 @@ ROOT = {findNodes = function(self, q)
   local n = i and NODES[i]
   return {name = function() return n and q or '' end, size = function() return n and 1 or 0 end, getPosition = function() return n and n.pos end, getLook = function() return n and n.look end}
 end}
-function ac.findNodes(q) return ROOT end
+SCENE = 0 -- scene searches made (a search per frame made the game run badly with DEBUG=1)
+function ac.findNodes(q) SCENE = SCENE + 1 return ROOT end
 OTHER = {index = 1, sessionID = 4} -- another driver's car as an event sender
 function OTHER:driverName() return 'Other Driver' end
 SENT, SEND_OK = {}, true -- every event sent, and whether the server accepts sends right now (a stock server refuses faster than 5 per s)
@@ -163,10 +166,15 @@ xs = lambda q: [p[1] for p in lua.eval("QV[%d]" % q).values()]
 check(abs(max(zs(1)) - 51.24) < 1e-6 and abs(min(zs(1)) - 48.76) < 1e-6, "front line reaches the outer edges of both side lines (z 48.76 .. 51.24)")
 check(abs(max(xs(2)) - 101.44) < 1e-6 and abs(max(xs(3)) - 101.44) < 1e-6, "side lines reach the front edge of the front line (x 101.44): square outer corners")
 
-# 2b grid position counts only connected cars ahead: here one disconnected slot ahead, one connected ahead, one behind
-lua = make(); lua.execute("SIM.carsCount = 4; OTHERS = {[1] = {isConnected = false, racePosition = 1}, [2] = {isConnected = true, racePosition = 2}, [3] = {isConnected = true, racePosition = 5}}")
+# 2b a box from the car's own spot (no start slot) is named by the grid position among the connected cars: here one disconnected slot
+# ahead, one connected ahead, one behind. A box from a start slot is named after the slot instead (the race positions do not matter).
+others = "SIM.carsCount = 4; OTHERS = {[1] = {isConnected = false, racePosition = 1}, [2] = {isConnected = true, racePosition = 2}, [3] = {isConnected = true, racePosition = 5}}"
+lua = make(); lua.execute("SLOT = -1; place(300, 300); " + others)
 start_race(lua); lua.execute("frame()")
-check(n(lua, "LABELS[1]") == "P2  YOUR BOX", "grid position = 1 + connected cars ahead (the empty slot ahead is ignored)")
+check(n(lua, "LABELS[1]") == "P2  YOUR BOX", "car fallback: grid position = 1 + connected cars ahead (the empty slot ahead is ignored)")
+lua = make(); lua.execute(others)
+start_race(lua); lua.execute("frame()")
+check(n(lua, "LABELS[1]") == "P1  YOUR BOX", "a box from slot AC_START_0 is P1 whatever the race positions of the cars are")
 
 # 2c the box lies on the visible road (a ray down onto the track meshes), not on the physics contact points or the car origin
 lua = make(); lua.execute("CAR.position.y = -0.2; for k = 0, 3 do CAR.wheels[k].contactPoint.y = -0.05 end; GROUND = function(x, z) return 0.02 end; SESSION_CB(1, false); run(2); frame()")
@@ -253,7 +261,13 @@ check(n(lua, "#QUADS") == 0, "hidden again after the second lights out")
 # 11 hide button, and all three buttons are admin only
 lua.execute("button('Grid: show boxes'); button('Grid: hide boxes'); frame()")
 check(n(lua, "#QUADS") == 0, "hide button hides the box")
-check(n(lua, "#BUTTONS") == 5 and all(n(lua, "BUTTONS[%d].flags" % i) == 1 for i in (1, 2, 3, 4, 5)), "five admin-only buttons are registered")
+check(n(lua, "#BUTTONS") == 4 and all(n(lua, "BUTTONS[%d].flags" % i) == 1 for i in (1, 2, 3, 4)), "four admin-only buttons are registered: re-record, show, hide, show all")
+lua = make({"EXTRA_TOOLS": 1}); start_race(lua)
+check(n(lua, "#BUTTONS") == 5 and all(n(lua, "BUTTONS[%d].flags" % i) == 1 for i in (1, 2, 3, 4, 5)), "EXTRA_TOOLS=1 adds 'toggle lines' (five buttons)")
+lua = make({"DEBUG": 1}); start_race(lua)
+check(n(lua, "#BUTTONS") == 4, "DEBUG alone adds no buttons")
+lua = make({"DEBUG": 1, "EXTRA_TOOLS": 1}); start_race(lua)
+check(n(lua, "#BUTTONS") == 9, "DEBUG + EXTRA_TOOLS=1: toggle lines and the four test buttons (nine in all)")
 
 # 12 position text only
 lua = make({"STYLE": "text"}); start_race(lua); lua.execute("frame()")
@@ -265,13 +279,13 @@ lua = make({"STYLE": "text"}); start_race(lua); lua.execute("place(100.30, 50.52
 check(n(lua, "#HUD") == 0, "STYLE=TEXT: a car 0.26 m forward and out sideways gets no HUD warning")
 lua.execute("lights(100, 100); run(1)")
 check(n(lua, "nreports()") == 0, "STYLE=TEXT: no report at lights out")
-lua = make(); start_race(lua); lua.execute("button('Grid: toggle lines'); frame()")
+lua = make({"EXTRA_TOOLS": 1}); start_race(lua); lua.execute("button('Grid: toggle lines'); frame()")
 check(n(lua, "#QUADS") == 0 and n(lua, "LABELS[1]") == "P1", "toggle button: lines off, position text stays")
 lua.execute("button('Grid: toggle lines'); frame()")
 check(n(lua, "#QUADS") == 3, "toggle button again: lines back")
-lua = make(); start_race(lua); lua.execute("place(100.30, 50); run(1); button('Grid: toggle lines'); lights(100, 100); run(1)")
+lua = make({"EXTRA_TOOLS": 1}); start_race(lua); lua.execute("place(100.30, 50); run(1); button('Grid: toggle lines'); lights(100, 100); run(1)")
 check(n(lua, "nreports()") == 0, "lines toggled off before the lights go out: no report")
-lua = make(); start_race(lua); lua.execute("place(100.30, 50); run(1); button('Grid: toggle lines'); button('Grid: toggle lines'); lights(100, 100); run(1)")
+lua = make({"EXTRA_TOOLS": 1}); start_race(lua); lua.execute("place(100.30, 50); run(1); button('Grid: toggle lines'); button('Grid: toggle lines'); lights(100, 100); run(1)")
 check(n(lua, "nreports()") == 1, "lines toggled off and on again: the check is back")
 
 # 12b reports go to the admin's file and never to the chat
@@ -375,8 +389,8 @@ check(n(lua, "#QUADS") == 3, "no physics transform: no slot box, the car's own s
 lua = make({"DEBUG": 1}); lua.execute("SLOT = -1"); start_race(lua); lua.execute("frame()")
 check("from=slot 0 slotErr=0.00" in n(lua, "HUD[1][1]") and "P1  YOUR BOX" in list(lua.eval("LABELS").values()), "forcedPosition -1, car on node 0: the box comes from node 0")
 lua = make(); lua.execute("SLOT = -1; place(94.4, 53.3)"); start_race(lua); lua.execute("frame()")
-check(abs(max(xs(2)) - 95.44) < 1e-6 and n(lua, "LABELS[1]") == "P1  YOUR BOX",
-      "car 0.5 m from node 1: the box stands at node 1, labelled by the grid position among connected cars (P1), not node number + 1")
+check(abs(max(xs(2)) - 95.44) < 1e-6 and n(lua, "LABELS[1]") == "P2  YOUR BOX",
+      "car 0.5 m from node 1: the box stands at node 1 and is named after the slot (P2), not after the race position")
 lua = make({"DEBUG": 1}); lua.execute("SLOT = -1; place(97, 50)"); start_race(lua); lua.execute("frame()")
 check("from=car" in n(lua, "HUD[1][1]") and abs(max(xs(2)) - 98.44) < 1e-6, "car 3 m from the nearest node (radius 2 m): the box stands where the car stands")
 lua = make({"SLOT_RADIUS_M": 0, "DEBUG": 1}); lua.execute("SLOT = -1"); start_race(lua); lua.execute("frame()")
@@ -437,7 +451,7 @@ check(n(lua, "#QUADS") == 0 and "P2  Other Driver" in list(lua.eval("LABELS").va
 # 23 debugging aids (DEBUG=1 only): log lines in the CSP log, start node markers, nudge buttons for the line offset
 logtext = lambda lua: chr(10).join(lua.eval("LOG").values())
 lua = make(); start_race(lua); lua.execute("lights(2000, 1500); run(4); frame()")
-check(not [l for l in lua.eval("LOG").values() if l.startswith("GridBox: ")] and n(lua, "#CROSSES") == 0 and n(lua, "#BUTTONS") == 5,
+check(not [l for l in lua.eval("LOG").values() if l.startswith("GridBox: ")] and n(lua, "#CROSSES") == 0 and n(lua, "#BUTTONS") == 4,
       "DEBUG off: no debug lines logged, no node markers, no nudge buttons")
 lua = make({"DEBUG": 1}); start_race(lua); lua.execute("lights(2000, 1500); run(4); frame()")
 log = logtext(lua)
@@ -446,10 +460,16 @@ check("recorded P1 from=slot 0 (nearest node)" in log and "slotErr=0.00 line-off
       and "lights out: box shown=true" in log and "session start callback (it still shows the previous session): index 1, type 3, forcedPosition -1" in log,
       "DEBUG: session start, recording, start lights and lights out are logged")
 lua.execute("frame()")
-check(n(lua, "#CROSSES") == 2 and "AC_START_0" in list(lua.eval("LABELS").values()), "DEBUG: the start nodes near the car are marked with a cross, an arrow and their name")
-lua = make({"DEBUG": 1}); lua.execute("place(300, 300)"); start_race(lua); lua.execute("frame()")
-check(n(lua, "#CROSSES") == 0, "DEBUG: start nodes further than 40 m from the car are not marked")
-lua = make({"DEBUG": 1}); start_race(lua); lua.execute("button('Grid debug: front line 5 cm forward'); frame()")
+check(n(lua, "#CROSSES") == 0 and "AC_START_0" not in list(lua.eval("LABELS").values()), "DEBUG alone draws no start node markers (only the lines)")
+lua = make({"DEBUG": 1, "SHOW_START_NODES": 1}); start_race(lua); lua.execute("frame()")
+check(n(lua, "#CROSSES") == 2 and "AC_START_0" in list(lua.eval("LABELS").values()), "DEBUG + SHOW_START_NODES=1: the start nodes near the car are marked with a cross, an arrow and their name")
+lua = make({"SHOW_START_NODES": 1}); start_race(lua); lua.execute("frame()")
+check(n(lua, "#CROSSES") == 0, "SHOW_START_NODES=1 without DEBUG: no markers")
+lua = make({"DEBUG": 1, "SHOW_START_NODES": 1}); lua.execute("place(300, 300)"); start_race(lua); lua.execute("frame()")
+check(n(lua, "#CROSSES") == 0, "DEBUG + SHOW_START_NODES=1: start nodes further than 40 m from the car are not marked")
+lua = make({"DEBUG": 1}); start_race(lua); lua.execute("frame(); run(2); lights(500, 100); run(2); SCENE = 0; for i = 1, 100 do script.update(0.016) frame() end")
+check(n(lua, "SCENE") == 0, "DEBUG: no scene search per frame (100 frames after the start, in the lights-out phase and after it)")
+lua = make({"EXTRA_TOOLS": 1, "DEBUG": 1}); start_race(lua); lua.execute("button('Grid debug: front line 5 cm forward'); frame()")
 check(abs(max(xs(2)) - 101.49) < 1e-6 and "line-offset=+0.05 m" in n(lua, "HUD[2][1]") and "line-offset=+0.05 m" in logtext(lua),
       "DEBUG: 'front line 5 cm forward' moves the box line 5 cm and shows the new offset")
 lua.execute("button('Grid debug: front line 5 cm back'); button('Grid debug: front line 5 cm back'); frame()")
@@ -468,7 +488,7 @@ lua = make(); lua.execute(short); start_race(lua); lua.execute("frame()")
 check(abs(max(xs(2)) - 101.09) < 1e-6, "without LINE_FROM_NODE_M the line follows that car's front tyres (outer edge x 101.09)")
 lua = make({"LINE_FROM_NODE_M": 2.4, "SOURCE": "car"}); start_race(lua); lua.execute("frame()")
 check(abs(max(xs(2)) - 101.44) < 1e-6, "SOURCE=CAR ignores LINE_FROM_NODE_M (there is no node)")
-lua = make({"LINE_FROM_NODE_M": 2.4, "DEBUG": 1}); start_race(lua); lua.execute("button('Grid debug: front line 5 cm forward'); frame()")
+lua = make({"EXTRA_TOOLS": 1, "LINE_FROM_NODE_M": 2.4, "DEBUG": 1}); start_race(lua); lua.execute("button('Grid debug: front line 5 cm forward'); frame()")
 check("line-from-node=2.45 m" in n(lua, "HUD[2][1]") and abs(max(xs(2)) - 102.49) < 1e-6, "LINE_FROM_NODE_M with the nudge button: 2.45 m shown, the line moves 5 cm")
 lua = make({"DEBUG": 1}); start_race(lua); lua.execute("frame()")
 check("line-from-node=1.40 m" in n(lua, "HUD[2][1]"), "DEBUG shows the distance of the front line from the node (1.40 m for this car without the setting): the value to put in LINE_FROM_NODE_M")
@@ -492,19 +512,25 @@ check(n(lua, "#QUADS") == 0, "a box recorded in practice is gone when the race s
 
 # 26 DEBUG test aid: teleport the own car to the start grid
 lua = make(); start_race(lua)
-check(n(lua, "#TELEPORTS") == 0 and n(lua, "#BUTTONS") == 5, "DEBUG off: no teleport button")
-lua = make({"DEBUG": 1}); start_race(lua); lua.execute("button('Grid debug: teleport my car to the start grid')")
-check(n(lua, "#TELEPORTS") == 1 and n(lua, "TELEPORTS[1][1]") == 0 and n(lua, "TELEPORTS[1][2]") == "START"
-      and "teleported the own car to the start grid" in logtext(lua), "DEBUG: the teleport button puts car 0 on the START spawn set and logs it")
+check(n(lua, "#TELEPORTS") == 0 and n(lua, "#BUTTONS") == 4, "DEBUG off: no teleport button")
+lua = make({"EXTRA_TOOLS": 1, "DEBUG": 1}); start_race(lua); lua.execute("button('Grid debug: teleport my car to the start grid')")
+check(n(lua, "#TELEPORTS") == 0 and n(lua, "#POSITIONS") == 1 and n(lua, "POSITIONS[1][1]") == 0 and n(lua, "POSITIONS[1][2]") == 100
+      and "teleported the own car to the start grid: AC_START_0" in logtext(lua), "DEBUG: the teleport button puts the car on the start node of its session ID (0) and logs it")
+lua = make({"EXTRA_TOOLS": 1, "DEBUG": 1}); lua.execute("CAR.sessionID = 1"); start_race(lua); lua.execute("button('Grid debug: teleport my car to the start grid')")
+check(n(lua, "POSITIONS[1][2]") == 94 and n(lua, "POSITIONS[1][3]") == 53 and "AC_START_1" in logtext(lua), "...a car with session ID 1 goes to node 1: two drivers do not land on the same slot")
+lua = make({"EXTRA_TOOLS": 1, "DEBUG": 1}); lua.execute("CAR.sessionID = 3"); start_race(lua); lua.execute("button('Grid debug: teleport my car to the start grid')")
+check(n(lua, "POSITIONS[1][2]") == 94 and "AC_START_1" in logtext(lua), "...a session ID beyond the node count wraps around")
+lua = make({"EXTRA_TOOLS": 1, "DEBUG": 1}); lua.execute("NODES = {}"); start_race(lua); lua.execute("button('Grid debug: teleport my car to the start grid')")
+check(n(lua, "#POSITIONS") == 0 and n(lua, "#TELEPORTS") == 1 and n(lua, "TELEPORTS[1][2]") == "START", "...a track without start nodes falls back to the START spawn set")
 
-# 27 logging of v1.6: always the load line, the welcome line and errors; with DEBUG everything a test needs
+# 27 logging of v1.7: always the load line, the welcome line and errors; with DEBUG everything a test needs
 OTHER_CAR = ("OTHERS = {[1] = {isConnected = true, racePosition = 5, speedKmh = 0, sessionID = 4, position = vec3(110, 0, 60), look = vec3(1, 0, 0), ping = 30, "
              "isInPitlane = false, driverName = function() return 'Other Driver' end, wheels = {[0] = {position = vec3(111.35, 0, 59.2)}, "
              "[1] = {position = vec3(111.35, 0, 60.8)}, [2] = {position = vec3(108.65, 0, 59.2)}, [3] = {position = vec3(108.65, 0, 60.8)}}}}; SIM.carsCount = 2")
 sent = lambda lua: [(lua.eval("SENT[%d].key" % i), lua.eval("SENT[%d].msg.what or 0" % i)) for i in range(1, lua.eval("#SENT") + 1)]
 nlog = lambda lua, text: logtext(lua).count(text)
 lua = make()
-check("GridBox v1.6 loaded, CSP build 3465" in logtext(lua) and "GridBox v1.6: welcome received, DEBUG=false source=AUTO record_in=RACE" in logtext(lua),
+check("GridBox v1.7 loaded, CSP build 3465" in logtext(lua) and "GridBox v1.7: welcome received, DEBUG=false source=AUTO record_in=RACE" in logtext(lua),
       "always: the version and CSP build at load and the settings that arrived with the welcome message are logged")
 lua = make(); start_race(lua); lua.execute("CAR.wheels = nil; run(1)")
 check(len([l for l in lua.eval("LOG").values() if "error:" in l]) == 1, "an error of the script is logged once, not every frame, with or without DEBUG")
@@ -542,7 +568,7 @@ lua = make({"DEBUG": 1}); lua.execute("SENT = {}"); start_race(lua)
 check(("GridBoxDebug", 1) in sent(lua), "DEBUG: a recording sends a status snapshot (what=1) to everybody")
 lua = make({"DEBUG": 1}); lua.execute("CAR.isInPitlane = true; SLOT = -1; SENT = {}"); start_race(lua)
 check(("GridBoxDebug", 2) in sent(lua) and "no box recorded" in logtext(lua), "DEBUG: a failed recording sends a snapshot too (what=2)")
-lua = make({"DEBUG": 1}); start_race(lua); lua.execute("SENT = {}; button('Grid debug: ask everyone for a status'); run(0.3)")
+lua = make({"EXTRA_TOOLS": 1, "DEBUG": 1}); start_race(lua); lua.execute("SENT = {}; button('Grid debug: ask everyone for a status'); run(0.3)")
 check(("GridBoxDebug", 6) in sent(lua), "DEBUG: the status button makes every client send a snapshot (what=6)")
 lua = make(); start_race(lua); lua.execute("SENT = {}; button('Grid: re-record boxes'); run(0.3)")
 check(not [k for k, w in sent(lua) if k == "GridBoxDebug"], "without DEBUG no status snapshot is sent")

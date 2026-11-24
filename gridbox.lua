@@ -44,6 +44,8 @@ local cfg = {
   jumpReport = true, -- report a car that moves before the start lights go out (it must have stood in its box after they were started)
   jump = 2,          -- km/h from which a car counts as moving for the jump start
   debug = false,     -- always show a status line (and a "loaded" message) so a silent script can be told from an idle one
+  showNodes = false, -- with debug: also draw the track's start nodes (yellow crosses + names) in the world; off, DEBUG draws nothing but the lines
+  extraTools = false, -- the admin menu has four buttons (re-record, show, hide, show all); true adds 'toggle lines' and, with debug, the test buttons
 }
 local grid, settle, lightsOut, lastError = nil, -1, nil, nil
 local retries = 0 -- recording attempts made after the first one, see tick()
@@ -56,7 +58,7 @@ local sessionInfoDue, rec = false, nil -- DEBUG: log the session once its settin
 local lastLoggedError
 local COL_OK, COL_OVER, COL_TXT = rgbm(0.2, 1, 0.4, 1), rgbm(1, 0.15, 0.1, 1), rgbm(1, 1, 1, 1) -- HUD colours; the lines are COL_TXT, always white
 
-local VERSION = 'v1.6'
+local VERSION = 'v1.7'
 do -- always, once per load: which script version runs on which CSP build (the first thing to look for in a driver's log)
   local ok, build = pcall(ac.getPatchVersionCode)
   pcall(ac.log, string.format('GridBox %s loaded, CSP build %s', VERSION, ok and tostring(build) or '?'))
@@ -282,7 +284,8 @@ local function slotBox(atSpawn)
   -- setting, at the front edge of this car's front tyres; LINE_OFFSET_M moves it either way
   local ahead = (cfg.lineFromNode > 0 and cfg.lineFromNode or frontOff + cfg.patch / 2) + cfg.lineOffset
   local g = newGrid(pos:clone():addScaled(fwd, ahead), pos:clone():addScaled(fwd, midOff), fwd,
-    c.wheelbase + 1.8, pos.y, assigned and index + 1 or gridPosition()) -- an assigned slot names the position, a nearest node does not (empty entries count)
+    c.wheelbase + 1.8, pos.y, index + 1) -- the box is named after its start slot (P1 = AC_START_0): the race position of the cars at the
+  -- session start is not the order they stand in (official server 2026-11-24: both cars got P2, the cars stood on slots 0 and 1)
   g.slot, g.ahead, g.how, g.forced = index, ahead, how, forced
   -- how far the box centre from the slot is from where the car really is: about 0 for a car standing on its spawn spot (DEBUG status)
   if car.speedKmh < cfg.still then g.slotErr = math.sqrt((g.center.x - mid.x) ^ 2 + (g.center.z - mid.z) ^ 2) end
@@ -583,8 +586,13 @@ end
 -- has and which one is nearest to the car right now
 local function slotStatus()
   local ok, text = pcall(function()
-    local best, dist, count = nearestStart(ac.findNodes('sceneRoot:yes'))
-    return string.format('start nodes=%d nearest=%s (%.2f m)', count, tostring(best), dist or -1)
+    -- from the nodes read once per session: a scene search per start node, twice per frame, made the game run badly with DEBUG=1
+    local nodes, o, best, dist = loadStartNodes(), physicsOrigin() or car.position, nil, nil
+    for i, nd in ipairs(nodes) do
+      local d = math.sqrt((nd.pos.x - o.x) ^ 2 + (nd.pos.z - o.z) ^ 2)
+      if not dist or d < dist then best, dist = i - 1, d end
+    end
+    return string.format('start nodes=%d nearest=%s (%.2f m)', #nodes, tostring(best), dist or -1)
   end)
   return string.format('why-not-slot=%s  %s  line-offset=%+.2f m  line-from-node=%s', slotWhy,
     ok and text or ('start nodes: error ' .. tostring(text)), cfg.lineOffset, grid and grid.ahead and string.format('%.2f m', grid.ahead) or '-')
@@ -596,9 +604,8 @@ function script.update(dt)
   if lastError ~= lastLoggedError then -- always, not only with DEBUG: a script that fails silently is the worst case
     lastLoggedError = lastError
     pcall(ac.log, string.format('GridBox: t=%.0f error: %s', sim.currentSessionTime, tostring(lastError)))
+    ac.debug('gridbox error', lastError)
   end
-  ac.debug('gridbox error', lastError)
-  if cfg.debug then ac.debug('gridbox status', status()) ac.debug('gridbox slot', slotStatus()) end
 end
 
 -- 3D boxes ---------------------------------------------------------------------------------------------------------
@@ -610,8 +617,8 @@ local function drawBox(bars, labelAt, text)
   render.debugText(labelAt, text, COL_TXT, cfg.style == 'TEXT' and 3 or 1.6)
 end
 
--- DEBUG: every start node of the track within 40 m of the car (a yellow cross, its facing and its name), to compare them with the
--- painted boxes of the track. Read once per session.
+-- DEBUG + SHOW_START_NODES=1: every start node of the track within 40 m of the car (a yellow cross, its facing and its name), to
+-- compare them with the painted boxes of the track. Read once per session.
 local COL_NODE = rgbm(1, 0.8, 0, 1)
 local function drawStartNodes()
   for _, n in ipairs(loadStartNodes()) do
@@ -625,7 +632,7 @@ local function drawStartNodes()
 end
 
 local function drawWorld()
-  if cfg.debug then drawStartNodes() end
+  if cfg.debug and cfg.showNodes then drawStartNodes() end
   local g = grid
   local own = g and (g.shown or showAll) -- the admin's "show all" includes the admin's own box even after the lights went out
   if not own and not (showAll and next(others)) then return end
@@ -821,6 +828,8 @@ ac.onOnlineWelcome(function(message, config)
   cfg.jumpReport = config:get('GRIDBOX', 'JUMP_REPORT', 1) == 1
   cfg.jump = config:get('GRIDBOX', 'JUMP_KMH', cfg.jump)
   cfg.debug = config:get('GRIDBOX', 'DEBUG', 0) == 1
+  cfg.showNodes = config:get('GRIDBOX', 'SHOW_START_NODES', 0) == 1
+  cfg.extraTools = config:get('GRIDBOX', 'EXTRA_TOOLS', 0) == 1
   -- always: proves that this client received the server's settings (without this line in a driver's log the welcome message did
   -- not arrive, for example because of the CSP new-menu bug) and which ones
   pcall(ac.log, string.format('GridBox %s: welcome received, DEBUG=%s source=%s record_in=%s style=%s line-from-node=%.2f line-offset=%.2f slot-radius=%.1f final-report=%s jump-report=%s',
@@ -834,7 +843,6 @@ ac.onOnlineWelcome(function(message, config)
   admin('Grid: re-record boxes', function() commandEvent({ cmd = 1 }) end)
   admin('Grid: show boxes', function() commandEvent({ cmd = 2 }) end)
   admin('Grid: hide boxes', function() commandEvent({ cmd = 3 }) end)
-  admin('Grid: toggle lines', function() commandEvent({ cmd = 4 }) end)
   -- only for this admin: show every driver's box; switching it on asks everybody to send their box again
   admin('Grid: show all boxes', function()
     showAll = not showAll
@@ -843,17 +851,21 @@ ac.onOnlineWelcome(function(message, config)
       commandEvent({ cmd = 5 })
     end
   end)
-  if cfg.debug then
+  if cfg.extraTools then admin('Grid: toggle lines', function() commandEvent({ cmd = 4 }) end) end
+  if cfg.debug and cfg.extraTools then
     -- tuning against painted lines: move the front line by 5 cm and record the own box again (this client only); the offset to put
     -- in LINE_OFFSET_M is shown as line-offset in the debug status
     local function nudge(d) cfg.lineOffset = cfg.lineOffset + d record(true) end
     admin('Grid debug: front line 5 cm forward', function() nudge(0.05) end)
     admin('Grid debug: front line 5 cm back', function() nudge(-0.05) end)
-    -- test aid when a test driver cannot drive to the grid: put the own car on its start slot (the game's START spawn set)
     admin('Grid debug: ask everyone for a status', function() commandEvent({ cmd = 6 }) end)
+    -- test aid when a test driver cannot drive to the grid: put the own car on a start slot. The game's START spawn set puts every car
+    -- on the same slot in a practice session (official server 2026-11-24), so each car gets the node of its own session ID instead.
     admin('Grid debug: teleport my car to the start grid', function()
-      physics.teleportCarTo(0, ac.SpawnSet.Start)
-      dlog('teleported the own car to the start grid')
+      local nodes = loadStartNodes()
+      local node = nodes[(car.sessionID % math.max(1, #nodes)) + 1]
+      if node then physics.setCarPosition(0, node.pos, node.look) else physics.teleportCarTo(0, ac.SpawnSet.Start) end
+      dlog('teleported the own car to the start grid: %s', node and node.name or 'the START spawn set (no start nodes)')
     end)
   end
 end)
