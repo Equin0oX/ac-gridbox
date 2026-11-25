@@ -296,24 +296,39 @@ check(" Test Driver  grid P1" in n(lua, "STORE.report_001"), "each line has a ti
 lua = make(); lua.execute("SIM.isAdmin = false"); start_race(lua); lua.execute("place(100.30, 50); run(1); lights(500, 100); run(1)")
 check(n(lua, "nreports()") == 0 and n(lua, "#CHAT") == 0, "a client that is not an admin writes nothing (it only sends the event)")
 
-# 12c jump start: a car that stood in its box after the lights were started and moves before they go out
+# 12c jump start: a car that stood in its box after the lights were started and is MOVING when they go out (moving in between and
+# stopping again, for example to reposition, is legal)
 lua = make(); start_race(lua); lua.execute("lights(2000, 1500); run(1); CAR.speedKmh = 20; run(0.5)")
-check(n(lua, "nreports()") == 1 and "JUMP START, moved 2450 ms before the lights went out" in n(lua, "lastreport()"), "car moves 2.45 s before lights out: reported as a jump start")
+check(n(lua, "nreports()") == 0, "a car moving 2.45 s before the lights-out is not reported while the lights are still on")
+lua.execute("run(3)")
+check(n(lua, "nreports()") == 1 and "JUMP START, moved 2450 ms before the lights went out" in n(lua, "lastreport()"), "...it is reported at the lights-out, still moving: jump start, with how long it had been moving")
 lua.execute("run(5)")
 check(n(lua, "nreports()") == 1, "a jump start is reported once per start")
+lua = make(); start_race(lua); lua.execute("lights(2000, 1500); run(1); CAR.speedKmh = 20; run(0.5); CAR.speedKmh = 0; run(1.2); run(3)")
+check(n(lua, "nreports()") == 0, "repositioning: moved after the lights started but stood still when they went out: legal, no report")
+lua.execute("CAR.speedKmh = 30; run(1)")
+check(n(lua, "nreports()") == 0, "...and driving off after the lights-out is legal")
+lua = make(); start_race(lua); lua.execute("lights(2000, 1500); run(1); CAR.speedKmh = 20; run(0.5); CAR.speedKmh = 0; run(0.5); CAR.speedKmh = 20; run(3)")
+check(n(lua, "nreports()") == 1 and "JUMP START" in n(lua, "lastreport()"), "moves, stops, moves again and is moving at the lights-out: jump start")
+lua = make(); start_race(lua); lua.execute("lights(2000, 1500); run(1); CAR.speedKmh = 20; run(0.5); CAR.speedKmh = 0; run(0.5); CAR.speedKmh = 20; run(3)")
+check("moved 1450 ms before" in n(lua, "lastreport()"), "...the time counts from when it started moving the last time, not from the first movement")
 # F1_STYLE starts: the first Start Lights message has a delay of 99999999 ms, the real lights-out comes with a second message
 lua = make(); start_race(lua); lua.execute("lights(5000, 99999999); run(1); CAR.speedKmh = 20; run(0.5)")
-check(n(lua, "nreports()") == 1 and n(lua, "lastreport()").endswith("JUMP START, moved before the lights went out"),
-      "F1_STYLE: a jump start before the manual lights-out is reported without a meaningless number of milliseconds")
+check(n(lua, "nreports()") == 0, "F1_STYLE: a car that moves while the lights are held is not reported yet")
+lua.execute("lights(0, 50); run(0.2)")
+check(n(lua, "nreports()") == 1 and "JUMP START, moved" in n(lua, "lastreport()") and "99999" not in n(lua, "lastreport()"),
+      "F1_STYLE: a car still moving at the manual lights-out is a jump start, with the time it had been moving (not the hold)")
+lua = make(); start_race(lua); lua.execute("lights(5000, 99999999); run(1); CAR.speedKmh = 20; run(0.5); CAR.speedKmh = 0; run(1); lights(0, 50); run(0.2)")
+check(n(lua, "nreports()") == 0, "F1_STYLE: a car that moved while the lights were held but stands when they are released is legal")
 lua = make(); start_race(lua); lua.execute("lights(5000, 99999999); run(2); lights(0, 50); run(0.2); frame()")
 check(n(lua, "#QUADS") == 0 and n(lua, "nreports()") == 0, "F1_STYLE: the second message (Start Lights Out) ends the boxes and a parked car is not reported")
-lua = make(); start_race(lua); lua.execute("CAR.speedKmh = 20; lights(2000, 1500); run(1); CAR.speedKmh = 0; run(0.5); CAR.speedKmh = 20; run(0.5)")
+lua = make(); start_race(lua); lua.execute("CAR.speedKmh = 20; lights(2000, 1500); run(1); CAR.speedKmh = 0; run(0.5); CAR.speedKmh = 20; run(2.5)")
 check(n(lua, "nreports()") == 1, "a car still rolling when the lights started is only a jump start once it has stood in its box and moves again")
 lua = make(); start_race(lua); lua.execute("CAR.speedKmh = 20; lights(2000, 1500); run(5)")
 check(n(lua, "nreports()") == 0, "a car that never stood still after the lights started is not called a jump start")
 lua = make(); start_race(lua); lua.execute("lights(500, 100); run(1); CAR.speedKmh = 30; run(2)")
 check(n(lua, "nreports()") == 0, "moving only after the lights went out: no jump start")
-lua = make({"JUMP_REPORT": 0}); start_race(lua); lua.execute("lights(2000, 1500); run(1); CAR.speedKmh = 20; run(0.5)")
+lua = make({"JUMP_REPORT": 0}); start_race(lua); lua.execute("lights(2000, 1500); run(1); CAR.speedKmh = 20; run(3)")
 check(n(lua, "nreports()") == 0, "JUMP_REPORT=0 turns the jump start report off")
 
 # 13 config: tolerance, patch length and final report
@@ -523,14 +538,14 @@ check(n(lua, "POSITIONS[1][2]") == 94 and "AC_START_1" in logtext(lua), "...a se
 lua = make({"EXTRA_TOOLS": 1, "DEBUG": 1}); lua.execute("NODES = {}"); start_race(lua); lua.execute("button('Grid debug: teleport my car to the start grid')")
 check(n(lua, "#POSITIONS") == 0 and n(lua, "#TELEPORTS") == 1 and n(lua, "TELEPORTS[1][2]") == "START", "...a track without start nodes falls back to the START spawn set")
 
-# 27 logging of v1.7: always the load line, the welcome line and errors; with DEBUG everything a test needs
+# 27 logging of v1.8: always the load line, the welcome line and errors; with DEBUG everything a test needs
 OTHER_CAR = ("OTHERS = {[1] = {isConnected = true, racePosition = 5, speedKmh = 0, sessionID = 4, position = vec3(110, 0, 60), look = vec3(1, 0, 0), ping = 30, "
              "isInPitlane = false, driverName = function() return 'Other Driver' end, wheels = {[0] = {position = vec3(111.35, 0, 59.2)}, "
              "[1] = {position = vec3(111.35, 0, 60.8)}, [2] = {position = vec3(108.65, 0, 59.2)}, [3] = {position = vec3(108.65, 0, 60.8)}}}}; SIM.carsCount = 2")
 sent = lambda lua: [(lua.eval("SENT[%d].key" % i), lua.eval("SENT[%d].msg.what or 0" % i)) for i in range(1, lua.eval("#SENT") + 1)]
 nlog = lambda lua, text: logtext(lua).count(text)
 lua = make()
-check("GridBox v1.7 loaded, CSP build 3465" in logtext(lua) and "GridBox v1.7: welcome received, DEBUG=false source=AUTO record_in=RACE" in logtext(lua),
+check("GridBox v1.8 loaded, CSP build 3465" in logtext(lua) and "GridBox v1.8: welcome received, DEBUG=false source=AUTO record_in=RACE" in logtext(lua),
       "always: the version and CSP build at load and the settings that arrived with the welcome message are logged")
 lua = make(); start_race(lua); lua.execute("CAR.wheels = nil; run(1)")
 check(len([l for l in lua.eval("LOG").values() if "error:" in l]) == 1, "an error of the script is logged once, not every frame, with or without DEBUG")

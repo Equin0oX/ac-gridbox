@@ -58,7 +58,7 @@ local sessionInfoDue, rec = false, nil -- DEBUG: log the session once its settin
 local lastLoggedError
 local COL_OK, COL_OVER, COL_TXT = rgbm(0.2, 1, 0.4, 1), rgbm(1, 0.15, 0.1, 1), rgbm(1, 1, 1, 1) -- HUD colours; the lines are COL_TXT, always white
 
-local VERSION = 'v1.7'
+local VERSION = 'v1.8'
 do -- always, once per load: which script version runs on which CSP build (the first thing to look for in a driver's log)
   local ok, build = pcall(ac.getPatchVersionCode)
   pcall(ac.log, string.format('GridBox %s loaded, CSP build %s', VERSION, ok and tostring(build) or '?'))
@@ -551,21 +551,27 @@ local function tick(dt)
     grid.restOver, grid.restSide = grid.over, grid.side
   end
 
-  -- jump start: after the lights were started, a car that stood in its box and then moves before they go out
-  if lightsOut and cfg.jumpReport and not grid.jumped then
-    if near and car.speedKmh < cfg.jump then
-      grid.armed = true
-    elseif grid.armed and car.speedKmh >= cfg.jump then
-      grid.jumped = true
-      report(2, lightsOut - sim.currentSessionTime)
-      sendDebug(4)
+  -- jump start: a car that stood in its box after the lights were started and is MOVING at the moment they go out. Moving in
+  -- between and stopping again (repositioning) is legal, so nothing is judged until the lights-out; moveFrom is when it began to move.
+  if lightsOut and cfg.jumpReport then
+    if car.speedKmh < cfg.jump then
+      grid.moveFrom = nil
+      if near then grid.armed = true end
+    elseif not grid.moveFrom then
+      grid.moveFrom = sim.currentSessionTime
     end
   end
 
   if lightsOut and sim.currentSessionTime >= lightsOut then
+    local out = lightsOut
     lightsOut = nil
     dlog('lights out: box shown=%s speed=%.1f, measured at rest over=%.3f side=%.3f, now over=%.3f side=%.3f', tostring(grid.shown),
       car.speedKmh, grid.restOver, grid.restSide, grid.over, grid.side)
+    if cfg.jumpReport and grid.armed and not grid.jumped and car.speedKmh >= cfg.jump then
+      grid.jumped = true
+      report(2, out - (grid.moveFrom or out))
+      sendDebug(4)
+    end
     if grid.shown then
       if cfg.finalReport and checking() and (grid.restOver > cfg.tolerance or grid.restSide > cfg.tolerance) then report(0) end
       grid.shown = false
@@ -712,10 +718,12 @@ ac.OnlineEvent({
   startTime = ac.StructItem.float(),
   delayTime = ac.StructItem.float(),
 }, function(sender, message)
+  local pending = lightsOut ~= nil
   lightsOut = message.startTime + message.delayTime
   dlog('start lights event from car %s: startTime=%.0f delayTime=%.0f, lights out in %.0f ms', tostring(sender and sender.index),
     message.startTime, message.delayTime, lightsOut - sim.currentSessionTime)
-  if grid then grid.armed, grid.jumped = false, false end
+  -- a new start begins afresh; a second message while the lights are pending (the release of an F1-style hold) keeps what the car did
+  if grid and not pending then grid.armed, grid.jumped, grid.moveFrom = false, false, nil end
   if cfg.debug then
     pcall(function()
       recorderStart()
